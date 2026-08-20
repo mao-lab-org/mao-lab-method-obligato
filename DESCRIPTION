@@ -12,7 +12,7 @@ Description: Identifies the cell-type composition of doublets in single-cell RNA
     Composition can be applied downstream of any doublet detector; a detector is also
     provided. The name is the anglicised variant of the musical 'obbligato', a part
     that cannot be omitted.
-License: MIT + file LICENSE
+License: AGPL-3
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2

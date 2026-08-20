@@ -60,4 +60,4 @@ max_achievable_accuracy(true_A, true_B, decode, definition = "vocabulary")
 
 ## License
 
-MIT © Jiadong Mao, George Howitt, Michelle Meier
+GNU Affero General Public License v3 (AGPL-3) © Jiadong Mao, George Howitt, Michelle Meier
