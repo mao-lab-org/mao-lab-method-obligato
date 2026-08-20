@@ -22,7 +22,7 @@ out if the removal decision is to be informed.
 ```r
 # install.packages("remotes")
 remotes::install_github("jiadongm/PhiSpace/pkg")   # PhiSpace
-remotes::install_github("<your-user>/Obligato")    # this package
+remotes::install_github("jiadongm/Obligato")       # this package
 ```
 
 ## Usage
