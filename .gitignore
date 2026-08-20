@@ -1,0 +1,24 @@
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+# compiled
+*.o
+*.so
+*.dll
+src/*.o
+src/*.so
+# build artefacts
+*.tar.gz
+..Rcheck/
+*.Rcheck/
+/doc/
+/docs/
+# OS
+.DS_Store
+Thumbs.db
+
+# runtime logs
+inst/integration/*.log

@@ -1,0 +1,32 @@
+Package: Obligato
+Title: Doublet Composition Identification from Continuous Cell-Type Scores
+Version: 0.0.0.9000
+Authors@R: c(
+    person("Jiadong", "Mao", role = c("aut", "cre"), email = "chiatungmao@gmail.com"),
+    person("George", "Howitt", role = "aut"),
+    person("Michelle", "Meier", role = "aut"))
+Description: Identifies the cell-type composition of doublets in single-cell RNA-seq
+    data - which two cell types a doublet contains, not merely that a droplet is
+    abnormal. Fits per-pair logit-normal models over PhiSpace continuous cell-type
+    scores, treating within-lineage co-elevation as a baseline rather than as signal.
+    Composition can be applied downstream of any doublet detector; a detector is also
+    provided. The name is the anglicised variant of the musical 'obbligato', a part
+    that cannot be omitted.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+Depends: R (>= 4.2)
+Imports:
+    corpcor,
+    stats,
+    Matrix,
+    xgboost,
+    SingleCellExperiment,
+    PhiSpace
+Suggests:
+    testthat (>= 3.0.0),
+    knitr
+Remotes:
+    github::jiadongm/PhiSpace/pkg
+Config/testthat/edition: 3
