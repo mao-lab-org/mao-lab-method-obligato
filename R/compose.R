@@ -27,8 +27,10 @@ make_candidates <- function(top5) {
 # candidate set, score each pair under its fitted per-pair logit-normal model, and
 # rank by likelihood. `output = "top1"` returns the single max-likelihood pair —
 # the stored `dbllik_<candidates>_c1/c2` and the value M2b reproduces; `"topk"`
-# returns the k best pairs per cell. `"conformal"` is accepted but deferred to the
-# separate conformal-calibration step (a later Phase B item) and errors for now.
+# returns the k best pairs per cell. `"conformal"` is NOT handled here (this is the
+# low-level per-cell ranker with no calibration set); compose() intercepts
+# output = "conformal" and runs split-conformal — see R/conformal.R. Calling
+# compose_pairs directly with "conformal" errors.
 #
 # BRING YOUR OWN DETECTOR: `flagged` is any logical vector over the rows of `S`.
 # When NULL every cell is composed (matching the script, which composes all cells
@@ -125,8 +127,8 @@ compose <- function(query, reference, phenotypes, hc_singlets,
                     detector = "builtin",
                     n_per_pair = 200,
                     candidates = c("all5", "flex2", "fix1"),
-                    output = c("top1", "topk"),
-                    k = 3, seed = 1L,
+                    output = c("top1", "topk", "conformal"),
+                    k = 3, alpha = 0.10, seed = 1L,
                     score_fn = score_phispace) {
   candidates <- match.arg(candidates)
   output     <- match.arg(output)
@@ -175,14 +177,49 @@ compose <- function(query, reference, phenotypes, hc_singlets,
     stop("`detector` must be \"builtin\", \"none\", or a logical/numeric vector.", call. = FALSE)
   }
 
-  comp <- compose_pairs(S_all, mods$pair_models, candidates = candidates, output = output, k = k)
+  conformal <- NULL
+  if (output == "conformal") {
+    # Split-conformal prediction sets. A real query has no ground-truth pairs, so
+    # calibrate on a FRESH, independent batch of simulated doublets (known pairs,
+    # drawn from the same per-pair models, distinct seed so it is not the fit set).
+    # The calibration doublets are scored jointly with the query cells so they share
+    # the query normalisation regime, then scored against the fitted pair models.
+    sim_cal <- simulate_training_doublets(cnt, hc_idx, hc_labels, types,
+                                          n_per_pair, seed + 1L)
+    S_cal_join <- score_fn(cbind(cnt, sim_cal$counts), reference, phenotypes,
+                           " conformal-cal")
+    S_cal       <- S_cal_join[(ncol(cnt) + 1L):nrow(S_cal_join), , drop = FALSE]
+    log_h_cal   <- all_pair_ll(S_cal, mods$pair_models)
+    log_h_query <- all_pair_ll(S_all, mods$pair_models)
+
+    cf <- conformal_pairs(log_h_cal, sim_cal$pair_label, log_h_query, alpha = alpha)
+
+    # Long-format composition: one row per (cell, pair) in the cell's set. Cells
+    # with an empty set contribute no rows (recover them from `conformal$sizes`).
+    rows <- lapply(seq_len(nrow(S_all)), function(i) {
+      ps <- cf$sets[[i]]
+      if (length(ps) == 0L) return(NULL)
+      parts <- strsplit(ps, " \\+ ")
+      data.frame(cell = i,
+                 c1  = vapply(parts, function(p) p[1], character(1)),
+                 c2  = vapply(parts, function(p) p[2], character(1)),
+                 pair = ps, ll = log_h_query[i, ps],
+                 stringsAsFactors = FALSE)
+    })
+    comp      <- do.call(rbind, rows)
+    conformal <- list(q_hat = cf$q_hat, alpha = alpha, sizes = cf$sizes)
+  } else {
+    comp <- compose_pairs(S_all, mods$pair_models, candidates = candidates,
+                          output = output, k = k)
+  }
 
   info <- list(n_cells = ncol(query), n_hc_singlets = n_sing, types = types,
                detector = if (is.character(detector)) detector else "byo",
                candidates = candidates, output = output,
-               n_per_pair = n_per_pair, seed = seed, threshold = threshold)
+               n_per_pair = n_per_pair, seed = seed, threshold = threshold,
+               alpha = if (output == "conformal") alpha else NULL)
 
   structure(list(composition = comp, detection_score = det_score, flag = flag,
-                 models = mods, info = info),
+                 conformal = conformal, models = mods, info = info),
             class = "obligato_composition")
 }
