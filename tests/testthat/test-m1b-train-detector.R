@@ -12,12 +12,12 @@
 #   * the locked balancing rule and hyperparameters.
 ################################################################################
 
-# Synthetic feature frames with the 8 Method C feature columns (values are
+# Synthetic feature frames with the 7 Method C feature columns (values are
 # arbitrary here — train_detector only rbinds and matrixifies them).
 make_features <- function(n, seed) {
   set.seed(seed)
   data.frame(
-    max_score = runif(n), top_gap = runif(n), entropy = runif(n), eff_n = runif(n),
+    max_score = runif(n), top_gap = runif(n), entropy = runif(n),
     sing_LL = rnorm(n), dbl_LL = rnorm(n), ll_diff = rnorm(n), min_maha = runif(n, 0, 5)
   )
 }

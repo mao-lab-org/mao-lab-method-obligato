@@ -33,7 +33,6 @@ compute_features <- function(S, sing_models, pair_models) {
   Sx <- S - apply(S, 1, max)
   P  <- exp(Sx); P <- P / rowSums(P)
   ent <- -rowSums(P * log(P + 1e-12))
-  eff_n <- exp(ent)
 
   sing_LL  <- matrix(-Inf, N, length(sing_models))
   sing_q   <- matrix( Inf, N, length(sing_models))
@@ -53,7 +52,6 @@ compute_features <- function(S, sing_models, pair_models) {
     max_score   = top1,
     top_gap     = gap,
     entropy     = ent,
-    eff_n       = eff_n,
     sing_LL     = max_sing_LL,
     dbl_LL      = max_dbl_LL,
     ll_diff     = max_dbl_LL - max_sing_LL,

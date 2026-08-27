@@ -74,7 +74,7 @@ comp_agreement <- mean(agree)
 det_spearman <- suppressWarnings(cor(m$det, m$detection_score, method = "spearman"))
 det_maxdiff  <- max(abs(m$det - m$detection_score))
 
-stored_thr  <- 0.7110357
+stored_thr  <- 0.7100192   # regenerated 7-feature King reference (S2/Item 1, 2026-08-25)
 pkg_flag    <- m$det > res$info$threshold
 stored_flag <- m$detection_score > stored_thr
 jac <- sum(pkg_flag & stored_flag) / sum(pkg_flag | stored_flag)
