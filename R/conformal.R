@@ -1,24 +1,9 @@
-##############################################################################
-# Split-conformal prediction sets for doublet composition (S4 / Item 3).
+# Internal split-conformal prediction sets for composition.
 #
-# Extracted from Phase0_Detection/conformal_composition.R (Sections 3-5), the
-# base-R split-conformal procedure with negative-log-likelihood nonconformity.
-# Factored into two pure functions so the algorithm is golden-testable in
-# isolation and compose() can wire it to whatever calibration source is available.
-#
-# Nonconformity of a candidate pair p for a cell is s = -loglik_p(cell): the true
-# pair should score high (small s). Given a labelled calibration set we take the
-# (1-alpha)-quantile of the true-pair nonconformity as q_hat, and the prediction
-# set for a query cell is every pair whose nonconformity <= q_hat, i.e. every pair
-# with loglik >= -q_hat. With exchangeable calibration/query draws this set covers
-# the true pair with probability >= 1 - alpha.
-#
-# NOTE ON CALIBRATION SOURCE. The eval script calibrates on ground-truth doublets
-# (known pairs) held out from the test set. A production query has no ground-truth
-# pairs, so compose() instead calibrates on freshly simulated doublets, whose pairs
-# are known by construction and are drawn from the same per-pair models. The pure
-# functions below are agnostic to which source supplies (log_h, true_pairs).
-##############################################################################
+# Negative pair log-likelihood is the nonconformity score. Under exchangeability,
+# the finite-sample order-statistic threshold covers the true pair with probability
+# at least 1 - alpha. compose() uses an independent synthetic calibration sample;
+# empirical coverage should be checked whenever labelled doublets are available.--- .gitignore
 
 # All-pairs log-likelihood matrix: cell x pair-model, colnames = pair labels.
 # Shared by compose_pairs' ranking and the conformal path (mvn_ll_rows batched).
@@ -49,9 +34,10 @@ conformal_calibrate <- function(log_h, true_pairs, alpha = 0.10) {
     if (!is.na(tp) && tp %in% pm) -log_h[i, tp] else Inf
   }, numeric(1))
 
+  sorted <- sort(s_cal)
   q <- vapply(alpha, function(a) {
-    level <- min(ceiling((1 - a) * (n_cal + 1)) / n_cal, 1)  # split-conformal level
-    unname(quantile(s_cal, probs = level, type = 7))
+    rank <- min(ceiling((1 - a) * (n_cal + 1)), n_cal)
+    sorted[[rank]]
   }, numeric(1))
   names(q) <- paste0("alpha_", alpha)
   q

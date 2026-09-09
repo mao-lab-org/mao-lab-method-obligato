@@ -60,10 +60,8 @@ test_that("logit-normal model functions are byte-identical to the scripts", {
 test_that("candidate construction is identical to the script", {
   skip_if_no_scripts()
   e <- source_defs(file.path(PROJ, "Phase0_Detection", "run_methodC_compose.R"))
-  set.seed(2)
-  S <- matrix(runif(25 * 8), nrow = 25,
-              dimnames = list(NULL, paste0("type", 1:8)))
-  expect_identical(make_candidates(S), e$make_candidates(S))
+  top5 <- paste0("type", 1:5)
+  expect_identical(make_candidates(top5), e$make_candidates(top5))
 })
 
 test_that("pair_label is order-invariant (property, not just parity)", {

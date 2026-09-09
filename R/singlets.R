@@ -1,20 +1,23 @@
-##############################################################################
-# High-confidence singlet selection.
-# Extracted VERBATIM from eval_harness.R (M1).
-##############################################################################
-
-# Numerical guard for the logit transform. Extracted verbatim from
-# eval_harness.R:56 — omitted in the first M1 pass, which the parity gate caught
-# (`object '.EPS' not found`). Exactly the class of hidden dependency the gate exists for.
+# High-confidence singlet selection with a numerically guarded logit transform.
 .EPS <- 1e-7
 
 .clip01 <- function(s) pmin(pmax(s, .EPS), 1 - .EPS)
 
 .logit  <- function(s) { sc <- .clip01(s); log(sc / (1 - sc)) }
 
-fit_logitnorm_mix <- function(s, init_class, n_iter = 200, tol = 1e-7) {
+fit_logitnorm_mix <- function(s, init_class, n_iter = 200L, tol = 1e-7) {
+  if (!is.numeric(s) || !length(s) || length(init_class) != length(s) ||
+      anyNA(s) || any(!is.finite(s)) || any(s < 0 | s > 1) || anyNA(init_class) ||
+      any(!init_class %in% 1:2) || any(tabulate(init_class, 2L) < 2L)) {
+    stop("`s` must be finite; `init_class` must assign at least two values to each class.",
+         call. = FALSE)
+  }
+  n_iter <- .validate_scalar_integer(n_iter, "n_iter", 1L)
+  if (length(tol) != 1L || !is.numeric(tol) || is.na(tol) || tol <= 0) {
+    stop("`tol` must be a single positive number.", call. = FALSE)
+  }
 
-  y <- .logit(s); N <- length(y); K <- 2
+  y <- .logit(s); N <- length(y); K <- 2L
   mu <- sigma <- pi_k <- numeric(K)
   for (k in 1:K) {
     yi <- y[init_class == k]
@@ -38,7 +41,7 @@ fit_logitnorm_mix <- function(s, init_class, n_iter = 200, tol = 1e-7) {
       w  <- gamma[, k]
       W  <- sum(w)
       mu[k]    <- sum(w * y) / W
-      sigma[k] <- sqrt(sum(w * (y - mu[k])^2) / W)
+      sigma[k] <- max(sqrt(sum(w * (y - mu[k])^2) / W), 1e-6)
     }
 
     ll <- sum(log_norm)
@@ -60,8 +63,22 @@ posterior_doublet_score <- function(s, fit) {
   exp(l2 - m) / (exp(l1 - m) + exp(l2 - m))
 }
 
-# Cutoff on raw score s such that P(doublet | s*) = target.
+#' Estimate a high-confidence singlet cutoff
+#'
+#' Fits a two-component logit-normal mixture to a score and returns the score at
+#' which the posterior probability of the higher-score component reaches the
+#' requested value.
+#' @param s Numeric scores in the unit interval.
+#' @param init_class Initial component assignments coded as 1 and 2, with at least
+#'   two observations in each component.
+#' @param target_posterior Posterior probability used to define the cutoff.
+#' @return A list containing `cutoff` and the fitted mixture `fit`.
+#' @export
 hc_singlet_cutoff <- function(s, init_class, target_posterior = 0.01) {
+  if (length(target_posterior) != 1L || !is.numeric(target_posterior) ||
+      is.na(target_posterior) || target_posterior <= 0 || target_posterior >= 1) {
+    stop("`target_posterior` must be strictly between zero and one.", call. = FALSE)
+  }
   fit <- fit_logitnorm_mix(s, init_class)
   f <- function(x) posterior_doublet_score(x, fit) - target_posterior
   if (f(.EPS) > 0) return(list(cutoff = .EPS, fit = fit))

@@ -19,6 +19,3 @@ src/*.so
 # OS
 .DS_Store
 Thumbs.db
-
-# runtime logs
-inst/integration/*.log

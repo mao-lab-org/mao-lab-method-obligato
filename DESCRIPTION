@@ -1,6 +1,6 @@
 Package: Obligato
 Title: Doublet Composition Identification from Continuous Cell-Type Scores
-Version: 0.0.0.9000
+Version: 0.0.0.9001
 Authors@R:
     person("Jiadong", "Mao", role = c("aut", "cre"), email = "chiatungmao@gmail.com")
 Description: Identifies the cell-type composition of doublets in single-cell RNA-seq
@@ -11,9 +11,11 @@ Description: Identifies the cell-type composition of doublets in single-cell RNA
     provided. The name is the anglicised variant of the musical 'obbligato', a part
     that cannot be omitted.
 License: AGPL-3
+URL: https://github.com/mao-lab-org/mao-lab-method-obligato
+BugReports: https://github.com/mao-lab-org/mao-lab-method-obligato/issues
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.2
+RoxygenNote: 7.3.3
 Depends: R (>= 4.2)
 Imports:
     corpcor,

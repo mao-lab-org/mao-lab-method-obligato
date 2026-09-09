@@ -44,6 +44,8 @@ test_that("compose builtin detector returns composition + score + flag", {
   expect_length(res$flag, 200)
   expect_true(is.logical(res$flag))
   expect_true(is.numeric(res$info$threshold))
+  expect_false(is.null(res$detection_model))
+  expect_identical(res$info$detection_features, "PhiSpace scores plus library size")
 })
 
 test_that("detector = 'none' composes without flagging", {
@@ -62,9 +64,11 @@ test_that("bring-your-own-detector uses the supplied flags", {
   expect_null(res$detection_score)
   expect_identical(res$info$detector, "byo")
 
-  # numeric scores are thresholded at 0.5
+  # Numeric scores require an explicit threshold and are retained in the result.
   sc <- runif(200)
-  res2 <- do.call(compose, common_args(s, detector = sc))
+  expect_error(do.call(compose, common_args(s, detector = sc)), "detector_threshold")
+  res2 <- do.call(compose, common_args(
+    s, detector = sc, detector_threshold = 0.5))
   expect_identical(res2$flag, sc > 0.5)
 })
 

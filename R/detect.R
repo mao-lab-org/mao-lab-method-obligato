@@ -1,16 +1,7 @@
-##############################################################################
-# Detection features and PhiSpace scoring.
-# Extracted VERBATIM from run_methodC_compose.R (M1).
-##############################################################################
-
-# M1 DEVIATION — the only one, and it is not a behaviour change.
-# In the scripts this function read `PHENO` from the enclosing script scope, where it
-# was set from command-line arguments. A hidden global makes the function uncallable
-# inside a package and is exactly the reproducibility defect packaging removes, so the
-# dependency is promoted to an explicit argument. For any given `phenotypes` the
-# computation is byte-identical to the script; only the source of that value changes.
-# There is deliberately NO default: silently guessing the phenotype column is how
-# `Cell.class` vs `predicted.celltype.l1` passed zero cells (package_plan.md §9).
+# Internal PhiSpace scoring and detector features.
+#
+# The phenotype column is always explicit: guessing it can silently select the
+# wrong reference annotation.
 score_phispace <- function(counts, ref_sce, phenotypes, label = "") {
   q <- SingleCellExperiment(assays = list(counts = counts))
   q <- scranTransf(q)
@@ -19,20 +10,12 @@ score_phispace <- function(counts, ref_sce, phenotypes, label = "") {
                 regMethod = "PLS", center = TRUE, scale = FALSE,
                 storeUnNorm = TRUE)
   S <- reducedDim(q, "PhiSpace")
-  cat(sprintf("  [score%s] %d cells x %d types\n", label, nrow(S), ncol(S)))
   S
 }
 
-# Library-size detection features (M2d, 2026-09-09; lab feedback L1). PhiSpace
-# normalises library size out, so the score features ignore the strongest cheap
-# doublet signal (a doublet has ~2x UMIs). These add it back:
-#   log_total  = log1p(total counts)
-#   n_genes    = number of genes detected
-#   typerel    = log_total minus the median log_total of the cell's top-1 type
-#                (removes the cell-type-size confound; the "type-relative" A2 term)
-# `type_median` is a per-type median fitted on the training singlets (passed in);
-# when absent, typerel is omitted (raw-only, the ablation A1). Detection-only —
-# DblLik composition never uses these.
+# Library-size features restore count-depth information removed by PhiSpace
+# normalization: log total counts, detected genes, and log total counts relative
+# to the median of the cell's highest-scoring type. They affect detection only.
 libsize_features <- function(counts, top1_type, type_median = NULL) {
   lt <- log1p(Matrix::colSums(counts))
   ng <- as.numeric(Matrix::colSums(counts > 0))
@@ -105,25 +88,8 @@ compute_features <- function(S, sing_models, pair_models, suffix = "") {
   feats
 }
 
-##############################################################################
-# Data-driven detection threshold: the balanced ecdf crossover.
-#
-# Extracted from run_compose_kingetal.R:304-316 (identical block in
-# run_compose_kingetal_full.R). package_plan.md §10 Phase B names this the
-# highest-value extraction: as free-standing inline code the threshold could be
-# bypassed by retyping a number (the `score > 0.5` error the package exists to
-# prevent). As a function with the crossover as its only behaviour, it cannot.
-#
-# It finds t* where the false-negative rate on simulated doublets equals the
-# flagging rate on real cells, i.e. ecdf_sim(t*) = 1 - ecdf_real(t*). This adapts
-# to the actual score distributions without user input.
-#
-# Behaviour-preserving deviations from the inline block, both minor and documented:
-#   * the hardcoded 0.5 fallback is exposed as the `fallback` argument, defaulting
-#     to the same 0.5, so an override is recorded rather than edited into a copy;
-#   * the script's cat() progress logging is dropped (it is a side effect, not part
-#     of the returned value the parity test pins).
-# For any given inputs the returned threshold is identical to the script's.
+# Balanced ECDF crossover threshold. It finds the score where the false-negative
+# rate among simulated doublets equals the flagging rate among query cells.
 ecdf_threshold <- function(real_scores, sim_scores, fallback = 0.5) {
   ecdf_real <- ecdf(real_scores)
   ecdf_sim  <- ecdf(sim_scores)
@@ -137,27 +103,8 @@ ecdf_threshold <- function(real_scores, sim_scores, fallback = 0.5) {
   }
 }
 
-##############################################################################
-# Train the xgboost detection classifier on singlet vs doublet features (M1b).
-#
-# Extracted from run_compose_kingetal.R:265-276 (Section 4), identical to
-# run_methodC_compose.R's process_batch training block. Wraps the locked balanced
-# 1:1 subsample and the locked xgboost hyperparameters.
-#
-# DETERMINISM — a sanctioned behaviour change, decided 2026-08-20 (package_plan
-# §6, §10 Phase B). The scripts trained under xgboost's defaults: multithreaded
-# and with no `seed`, which is NON-reproducible (two runs on identical inputs
-# differ by up to ~0.27 in predicted score, moving the ecdf threshold and the
-# flagged set). A package whose purpose is results that explain themselves cannot
-# ship a non-deterministic default, so this function defaults to `nthread = 1` and
-# a fixed `seed`, seeding BOTH the balancing subsample (R RNG) and xgboost's
-# internal RNG. Consequence: it does not bit-reproduce the OLD stored detection
-# scores (a non-deterministic draw); the M2b gate freezes a NEW deterministic
-# reference and checks the old numbers only within tolerance. Composition, models
-# and metrics are unaffected — they never depended on xgboost.
-#
-# Faithful-but-parameterised: with the defaults below the hyperparameters and the
-# balancing rule are exactly the scripts'; only reproducibility is added.
+# Train the xgboost detector on a balanced 1:1 singlet/doublet sample. A
+# single thread and explicit seeds provide reproducible package behavior.
 train_detector <- function(F_sing, F_dbl,
                            params = list(objective = "binary:logistic",
                                          eval_metric = "auc",
@@ -166,18 +113,28 @@ train_detector <- function(F_sing, F_dbl,
                            nrounds = 200,
                            seed = 1L,
                            nthread = 1L) {
-  # Balanced 1:1, bidirectional: subsample the larger class down to the smaller.
-  set.seed(seed)
+  if (!is.data.frame(F_sing) || !is.data.frame(F_dbl) ||
+      nrow(F_sing) < 1L || nrow(F_dbl) < 1L ||
+      !identical(names(F_sing), names(F_dbl))) {
+    stop("Training feature tables must be non-empty and have identical columns.",
+         call. = FALSE)
+  }
+  nrounds <- .validate_scalar_integer(nrounds, "nrounds", 1L)
+  nthread <- .validate_scalar_integer(nthread, "nthread", 1L)
+  seed <- .validate_scalar_integer(seed, "seed", 0L)
+
   n_bal <- min(nrow(F_sing), nrow(F_dbl))
-  Fs <- F_sing[sample(nrow(F_sing), n_bal), , drop = FALSE]
-  Fd <- F_dbl[sample(nrow(F_dbl),  n_bal), , drop = FALSE]
+  sampled <- .with_seed(seed, list(
+    sing = sample(nrow(F_sing), n_bal),
+    dbl = sample(nrow(F_dbl), n_bal)))
+  Fs <- F_sing[sampled$sing, , drop = FALSE]
+  Fd <- F_dbl[sampled$dbl, , drop = FALSE]
 
   X_train <- as.matrix(rbind(Fs, Fd))
   y_train <- c(rep(0L, nrow(Fs)), rep(1L, nrow(Fd)))
-
   p <- params
   p$nthread <- nthread
-  p$seed    <- seed
+  p$seed <- seed
 
   dtrain <- xgb.DMatrix(X_train, label = y_train)
   xgb.train(params = p, data = dtrain, nrounds = nrounds, verbose = 0)

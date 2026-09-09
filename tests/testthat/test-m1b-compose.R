@@ -92,5 +92,5 @@ test_that("flagged composes only the flagged cells, identically", {
 
 test_that("conformal output errors clearly (deferred to its own step)", {
   sc <- setup_scenario()
-  expect_error(compose_pairs(sc$S, sc$pair_models, output = "conformal"), "not yet implemented")
+  expect_error(compose_pairs(sc$S, sc$pair_models, output = "conformal"), "Use compose")
 })

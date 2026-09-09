@@ -45,6 +45,8 @@ test_that("compose_reffree returns a well-formed obligato_reffree object", {
   expect_length(res$detection_score, N)
   expect_length(res$flag, N); expect_true(is.logical(res$flag))
   expect_length(res$rounds, 2L)                       # rounds 0 and 1
+  expect_length(res$clusters, N)
+  expect_identical(res$info$detection_features, "PhiSpace scores")
   expect_true(length(res$pair_models) > 0L)
   expect_true(all(res$composition$top_pair %in% names(res$pair_models)))
 })

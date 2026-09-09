@@ -1,15 +1,15 @@
-##############################################################################
-# Logit-normal pair models.
-# Extracted VERBATIM from run_methodC_compose.R (M1). Do not modify behaviour here —
-# see package_plan.md §10: refactor and behaviour change must never share a commit.
-##############################################################################
+# Internal logit-normal model utilities.
 
 to_logit <- function(x, eps = 1e-3) {
   u <- (pmin(pmax(x, -1 + eps), 1 - eps) + 1) / 2
   log(u / (1 - u))
 }
 
-pair_label <- function(a, b) ifelse(a <= b, paste(a, "+", b), paste(b, "+", a))
+pair_label <- function(a, b) {
+  a <- as.character(a)
+  b <- as.character(b)
+  ifelse(a <= b, paste(a, "+", b), paste(b, "+", a))
+}
 
 fit_ln_shrink <- function(Y) {
   mu <- colMeans(Y)
@@ -33,29 +33,8 @@ marginal_ll <- function(y, mu, sigma) {
     0.5 * ((y - mu) / pmax(sigma, 1e-6))^2
 }
 
-##############################################################################
-# Fit the per-type singlet models and per-pair doublet models (M1b).
-#
-# Extracted from run_compose_kingetal.R:227-247 (Section 3), a block that is
-# byte-identical to run_methodC_compose.R's process_batch() fitting loop, so one
-# function serves both the King case study and the benchmark (needed for the M2b
-# replication gate).
-#
-# Fits, in logit space:
-#   * one shrunk logit-normal per singlet type with >= `min_singlet` cells;
-#   * per-type marginal SDs (consumed by marginal_ll);
-#   * one shrunk logit-normal per simulated pair with >= `min_pair` doublets.
-#
-# Behaviour-preserving deviations from the inline block, all documented:
-#   * the hardcoded 15 / 30 minimum-cell cutoffs become `min_singlet` / `min_pair`
-#     arguments defaulting to the same values;
-#   * the script's ambient `types` vector becomes the `types` argument, defaulting
-#     to the sorted unique singlet types. Iteration order affects only the order of
-#     the returned named lists, which is numerically irrelevant downstream
-#     (compute_features and mvn_ll_rows reduce over models with max);
-#   * the script's cat() progress logging is dropped.
-# For identical inputs (and matching `types`) every fitted model is identical to
-# the script's.
+# Fit shrunk logit-normal models for sufficiently represented singlet types and
+# synthetic doublet pairs. Pair labels remain unordered throughout.
 fit_doublet_models <- function(S_train_sing, hc_types, S_train_dbl, dbl_pl,
                                types = sort(unique(hc_types)),
                                min_singlet = 15, min_pair = 30) {
