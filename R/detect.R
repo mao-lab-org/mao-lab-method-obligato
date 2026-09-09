@@ -23,7 +23,48 @@ score_phispace <- function(counts, ref_sce, phenotypes, label = "") {
   S
 }
 
-compute_features <- function(S, sing_models, pair_models) {
+# Library-size detection features (M2d, 2026-09-09; lab feedback L1). PhiSpace
+# normalises library size out, so the score features ignore the strongest cheap
+# doublet signal (a doublet has ~2x UMIs). These add it back:
+#   log_total  = log1p(total counts)
+#   n_genes    = number of genes detected
+#   typerel    = log_total minus the median log_total of the cell's top-1 type
+#                (removes the cell-type-size confound; the "type-relative" A2 term)
+# `type_median` is a per-type median fitted on the training singlets (passed in);
+# when absent, typerel is omitted (raw-only, the ablation A1). Detection-only —
+# DblLik composition never uses these.
+libsize_features <- function(counts, top1_type, type_median = NULL) {
+  lt <- log1p(Matrix::colSums(counts))
+  ng <- as.numeric(Matrix::colSums(counts > 0))
+  out <- data.frame(log_total = lt, n_genes = ng)
+  if (!is.null(type_median)) {
+    tr <- lt - type_median[top1_type]
+    tr[is.na(tr)] <- 0
+    out$typerel <- tr
+  }
+  out
+}
+
+# Assign each cell to its highest-scoring type. Keeping this in one helper makes
+# the type-relative library-size definition identical in training and inference.
+top1_type <- function(S) {
+  if (is.null(colnames(S)) || ncol(S) < 1L) {
+    stop("`S` must have at least one named score column.", call. = FALSE)
+  }
+  colnames(S)[max.col(S, ties.method = "first")]
+}
+
+# Fit the type-relative library-size baseline on the score-derived top-1 types,
+# matching the validated A2 ablation. Do not group by supplied hc labels: those
+# labels can differ from the jointly normalised training scores used by detection.
+libsize_type_medians <- function(counts, S) {
+  if (ncol(counts) != nrow(S)) {
+    stop("`counts` columns must match `S` rows.", call. = FALSE)
+  }
+  base::tapply(log1p(Matrix::colSums(counts)), top1_type(S), stats::median)
+}
+
+compute_features <- function(S, sing_models, pair_models, suffix = "") {
   Y <- to_logit(S)
   N <- nrow(S); Tn <- ncol(S)
 
@@ -48,7 +89,7 @@ compute_features <- function(S, sing_models, pair_models) {
   for (j in seq_along(pair_models)) dbl_LL[, j] <- mvn_ll_rows(Y, pair_models[[j]])
   max_dbl_LL <- apply(dbl_LL, 1, max)
 
-  data.frame(
+  feats <- data.frame(
     max_score   = top1,
     top_gap     = gap,
     entropy     = ent,
@@ -57,6 +98,11 @@ compute_features <- function(S, sing_models, pair_models) {
     ll_diff     = max_dbl_LL - max_sing_LL,
     min_maha    = min_maha
   )
+  # Per-level suffix (e.g. "_l1", "_l2") so features from concatenated annotation
+  # levels stay distinct. Library size is added once at the compose() level (it is
+  # level-independent), not here.
+  if (nzchar(suffix)) names(feats) <- paste0(names(feats), suffix)
+  feats
 }
 
 ##############################################################################

@@ -11,7 +11,7 @@ make_candidates <- function(top5) {
       c2 = c(top5[2:5], top5[c(3, 4, 5)]),
       stringsAsFactors = FALSE),
     all5 = {
-      idx <- combn(5, 2)
+      idx <- utils::combn(5, 2)
       data.frame(c1 = top5[idx[1, ]], c2 = top5[idx[2, ]], stringsAsFactors = FALSE)
     }
   )
@@ -137,14 +137,28 @@ compose <- function(query, reference, phenotypes, hc_singlets,
   cnt    <- query
   hc_idx <- which(hc_singlets)
 
+  # Multi-level annotations (M2d option ii): `phenotypes` may name several label
+  # levels (e.g. c("celltype_l1","celltype_l2")); `reference` is then a LIST of
+  # SCEs, one per level (the benchmark's L1 and L2 references are different objects).
+  # The FIRST (primary) level drives high-confidence labels, doublet simulation,
+  # the DblLik composition, and the ecdf threshold; the additional levels are used
+  # only to concatenate extra DETECTION features. A single phenotype + single SCE
+  # is the ordinary single-level case.
+  phenotypes <- as.character(phenotypes)
+  # Single level: `reference` is one object (SCE, or a mock). Multiple levels:
+  # `reference` is a list of objects, one per phenotype level.
+  refs <- if (length(phenotypes) == 1L) list(reference) else reference
+  stopifnot(length(refs) == length(phenotypes))
+  ref1 <- refs[[1L]]; pheno1 <- phenotypes[[1L]]
+
   # Score all query cells (inference scores, and the source of derived hc labels).
-  S_all <- score_fn(cnt, reference, phenotypes, " all-cells")
+  S_all <- score_fn(cnt, ref1, pheno1, " all-cells")
 
   # High-confidence singlet labels: supplied, or top-1 of their scores.
   if (is.null(hc_labels)) {
     hc_labels <- colnames(S_all)[max.col(S_all[hc_idx, , drop = FALSE], ties.method = "first")]
   }
-  ref_types <- sort(unique(as.character(reference[[phenotypes]])))
+  ref_types <- sort(unique(as.character(ref1[[pheno1]])))
   valid     <- hc_labels %in% ref_types
   hc_idx    <- hc_idx[valid]
   hc_labels <- hc_labels[valid]
@@ -153,8 +167,8 @@ compose <- function(query, reference, phenotypes, hc_singlets,
   # Simulate training doublets, then score the joint pool (locked joint norm).
   sim   <- simulate_training_doublets(cnt, hc_idx, hc_labels, types, n_per_pair, seed)
   n_sing <- length(hc_idx)
-  S_join <- score_fn(cbind(cnt[, hc_idx, drop = FALSE], sim$counts),
-                     reference, phenotypes, " train-joint")
+  joint_counts <- cbind(cnt[, hc_idx, drop = FALSE], sim$counts)
+  S_join <- score_fn(joint_counts, ref1, pheno1, " train-joint")
   S_sing <- S_join[seq_len(n_sing), , drop = FALSE]
   S_dbl  <- S_join[(n_sing + 1L):nrow(S_join), , drop = FALSE]
 
@@ -163,9 +177,36 @@ compose <- function(query, reference, phenotypes, hc_singlets,
   # Optional detection module.
   det_score <- NULL; threshold <- NULL; flag <- NULL
   if (identical(detector, "builtin")) {
-    F_sing <- compute_features(S_sing, mods$sing_models, mods$pair_models)
-    F_dbl  <- compute_features(S_dbl,  mods$sing_models, mods$pair_models)
-    F_all  <- compute_features(S_all,  mods$sing_models, mods$pair_models)
+    n_levels <- length(phenotypes)
+    sfx <- function(i) if (n_levels > 1L) paste0("_l", i) else ""
+    # Per-level detection score features. Level 1 reuses the primary scores/models;
+    # extra levels are scored against their own reference and get their own models.
+    lvl_feats <- function(i) {
+      if (i == 1L) { Sa <- S_all; Ss <- S_sing; Sd <- S_dbl; m <- mods }
+      else {
+        Sa <- score_fn(cnt, refs[[i]], phenotypes[[i]], sprintf(" all-cells L%d", i))
+        Sj <- score_fn(joint_counts, refs[[i]], phenotypes[[i]], sprintf(" train-joint L%d", i))
+        Ss <- Sj[seq_len(n_sing), , drop = FALSE]
+        Sd <- Sj[(n_sing + 1L):nrow(Sj), , drop = FALSE]
+        m  <- fit_doublet_models(Ss, hc_labels, Sd, sim$pair_label, types)
+      }
+      list(sing = compute_features(Ss, m$sing_models, m$pair_models, suffix = sfx(i)),
+           dbl  = compute_features(Sd, m$sing_models, m$pair_models, suffix = sfx(i)),
+           all  = compute_features(Sa, m$sing_models, m$pair_models, suffix = sfx(i)))
+    }
+    parts  <- lapply(seq_len(n_levels), lvl_feats)
+    F_sing <- do.call(cbind, lapply(parts, `[[`, "sing"))
+    F_dbl  <- do.call(cbind, lapply(parts, `[[`, "dbl"))
+    F_all  <- do.call(cbind, lapply(parts, `[[`, "all"))
+
+    # M2d (lab feedback L1): one library-size block, added once (level-independent).
+    # Top-1 type + per-type median come from the PRIMARY level's singlet scores.
+    cnt_sing    <- cnt[, hc_idx, drop = FALSE]
+    type_median <- libsize_type_medians(cnt_sing, S_sing)
+    F_sing <- cbind(F_sing, libsize_features(cnt_sing,   top1_type(S_sing), type_median))
+    F_dbl  <- cbind(F_dbl,  libsize_features(sim$counts, top1_type(S_dbl),  type_median))
+    F_all  <- cbind(F_all,  libsize_features(cnt,        top1_type(S_all),  type_median))
+
     bst       <- train_detector(F_sing, F_dbl, seed = seed)
     det_score <- predict(bst, as.matrix(F_all))
     threshold <- ecdf_threshold(det_score, predict(bst, as.matrix(F_dbl)))
@@ -186,7 +227,9 @@ compose <- function(query, reference, phenotypes, hc_singlets,
     # the query normalisation regime, then scored against the fitted pair models.
     sim_cal <- simulate_training_doublets(cnt, hc_idx, hc_labels, types,
                                           n_per_pair, seed + 1L)
-    S_cal_join <- score_fn(cbind(cnt, sim_cal$counts), reference, phenotypes,
+    # Composition is defined in the primary score space, including when extra
+    # annotation levels are supplied for detection only.
+    S_cal_join <- score_fn(cbind(cnt, sim_cal$counts), ref1, pheno1,
                            " conformal-cal")
     S_cal       <- S_cal_join[(ncol(cnt) + 1L):nrow(S_cal_join), , drop = FALSE]
     log_h_cal   <- all_pair_ll(S_cal, mods$pair_models)

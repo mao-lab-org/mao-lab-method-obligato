@@ -7,7 +7,7 @@
 .trap_auc <- function(x, y) {
   ord <- order(x)
   x <- x[ord]; y <- y[ord]
-  sum(diff(x) * (head(y, -1) + tail(y, -1)) / 2)
+  sum(diff(x) * (utils::head(y, -1) + utils::tail(y, -1)) / 2)
 }
 
 # Compute precision-recall curve and AUPRC.
@@ -66,7 +66,7 @@ composition_accuracy <- function(pred_A, pred_B, true_A, true_B, lineage = NULL)
 majority_decode <- function(grouping, types) {
   ok  <- !is.na(grouping) & !is.na(types)
   tab <- table(grouping[ok], types[ok])
-  setNames(colnames(tab)[max.col(tab, ties.method = "first")], rownames(tab))
+  stats::setNames(colnames(tab)[max.col(tab, ties.method = "first")], rownames(tab))
 }
 
 # Maximum achievable accuracy: the best exact-pair accuracy any composition rule

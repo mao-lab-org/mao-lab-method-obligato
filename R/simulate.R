@@ -21,7 +21,7 @@ simulate_training_doublets <- function(counts, hc_idx, hc_types,
                                        n_per_pair = 200, seed = 1L) {
   set.seed(seed)
   type_to_cells <- split(seq_along(hc_idx), hc_types)
-  het_pairs <- combn(types, 2, simplify = FALSE)
+  het_pairs <- utils::combn(types, 2, simplify = FALSE)
 
   dblA <- integer(0); dblB <- integer(0); dbl_pl <- character(0)
   for (pr in het_pairs) {
