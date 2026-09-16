@@ -210,3 +210,15 @@ test_that("too little data to cross-validate falls back to no shrinkage", {
   expect_identical(out$lambda, 0)
   expect_identical(out$models$pair_models, base$pair_models)
 })
+
+test_that("compose_pairs errors when model names and score columns disagree", {
+  # Candidates are built from score column names, so models keyed on a different
+  # vocabulary match nothing. Without this check every droplet would come back
+  # with an empty call -- a silent wrong answer rather than a diagnosis.
+  S2 <- S_dbl
+  colnames(S2) <- paste0("other_", seq_len(ncol(S2)))
+  expect_error(
+    Obligato:::compose_pairs(S2, base$pair_models, candidates = "all5",
+                             output = "top1"),
+    "same cell-type vocabulary")
+})

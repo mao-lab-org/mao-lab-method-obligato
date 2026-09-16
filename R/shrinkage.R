@@ -114,6 +114,10 @@
     }
     te <- which(fold == f & dbl_pair %in% names(pm))
     if (!length(te) || !length(pm)) return(NA_real_)
+    # Scored with the same candidate rule compose() uses, so the selected weight
+    # is chosen under the criterion that will actually be applied. compose_pairs()
+    # errors if the model names and score columns disagree; it is not this
+    # function's job to paper over that.
     cp <- compose_pairs(S_dbl[te, , drop = FALSE], pm,
                         candidates = "all5", output = "top1")
     pred <- pair_label(cp$c1, cp$c2)

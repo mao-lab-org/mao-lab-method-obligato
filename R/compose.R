@@ -58,6 +58,21 @@ compose_pairs <- function(S, pair_models, flagged = NULL,
     character(n_top)))
 
   pm_names <- names(pair_models)
+
+  # Candidate pairs are built from the SCORE COLUMN NAMES, so the pair models
+  # must be keyed on the same cell-type vocabulary. If they are not, every
+  # candidate misses and the function would return empty calls for every droplet
+  # -- a silent wrong answer. Fail here instead, naming the cause.
+  pm_types <- unique(unlist(strsplit(pm_names, " + ", fixed = TRUE)))
+  if (!any(pm_types %in% dims)) {
+    stop("No pair model matches the score columns: the models are named with ",
+         "cell types (e.g. \"", pm_types[[1L]], "\") that do not appear among ",
+         "the score columns (e.g. \"", dims[[1L]], "\"). The pair models and the ",
+         "scores must use the same cell-type vocabulary; this usually means the ",
+         "labels used to fit the models came from a different annotation than ",
+         "the reference the scores were computed against.", call. = FALSE)
+  }
+
   LL <- matrix(-Inf, n, length(pm_names), dimnames = list(NULL, pm_names))
   for (pl in pm_names) LL[, pl] <- mvn_ll_rows(Y, pair_models[[pl]])
 
