@@ -116,6 +116,35 @@ Conformal sets are calibrated using independent synthetic doublets. Their nomina
 coverage relies on calibration and target doublets being exchangeable; users
 should verify empirical coverage when ground truth is available.
 
+### Shrinkage of the pair covariances
+
+Each cell-type pair needs its own covariance, estimated from the simulated
+doublets of that pair alone, so with many reference types the estimates get
+noisy. By default `compose()` blends each one toward a target predicted from the
+two constituents' singlet models — which are estimated from many more cells,
+since every type appears in many pairs — and chooses the blending weight by
+cross-validation on the simulated doublets.
+
+```r
+res <- compose(query, reference, "celltype", hc_flag)            # on by default
+
+res <- compose(query, reference, "celltype", hc_flag, eb = FALSE) # no shrinkage
+
+res <- compose(query, reference, "celltype", hc_flag,
+               eb_lambda = 0.5)                                   # skip the CV
+```
+
+The cross-validation needs no ground truth, and it can select a weight of zero,
+declining to shrink where shrinkage would not help — which is what it does on
+data whose pair covariances are already well determined. The chosen weight and
+the full cross-validation curve are recorded in `res$info$eb`.
+
+Selection costs around two minutes for a reference of twenty types and grows
+with the number of pairs; fixing `eb_lambda` to a number skips it. `eb_grid`
+should not be raised above its default ceiling without re-deriving the shrinkage
+path: the criterion often selects the largest weight offered, and past this range
+composition accuracy falls away, so the ceiling acts as a guard.
+
 ## Reference-free analysis
 
 `compose_reffree()` iteratively clusters unflagged cells and reports cluster-pair

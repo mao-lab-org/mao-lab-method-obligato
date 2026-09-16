@@ -125,10 +125,56 @@ compose_pairs <- function(S, pair_models, flagged = NULL,
 #' @param k Number of pairs returned when `output = "topk"`.
 #' @param alpha Miscoverage level for conformal sets.
 #' @param seed Non-negative integer controlling simulation, scoring, and training.
+#' @param eb Shrink the doublet-pair covariances toward a target predicted from
+#'   the constituents' singlet models (default `TRUE`). `FALSE` restores the
+#'   previous Ledoit-Wolf-only behaviour exactly.
+#' @param eb_lambda `"cv"` (default) to choose the shrinkage weight by
+#'   cross-validated exact-pair accuracy on the simulated doublets, or a number
+#'   in `[0, 1]` to fix it. Cross-validation needs no ground truth, and can
+#'   return 0, declining to shrink where shrinkage would not help.
+#' @param eb_grid Candidate weights for `eb_lambda = "cv"`; must contain 0.
+#' @param eb_R Monte-Carlo draws used to build each target.
+#' @param eb_nfold Cross-validation folds for `eb_lambda = "cv"`.
 #' @param score_fn Advanced scoring function with the same interface as
 #'   `score_phispace()`.
 #' @return An `obligato_composition` object containing composition calls,
 #'   detection scores and flags, fitted composition models, parameters, and provenance.
+#'
+#' @section Shrinkage of the doublet-pair covariances:
+#'
+#' Each pair model needs a covariance over the cell-type score vector, and a
+#' reference with `T` types has `T(T-1)/2` pairs to estimate, each from the
+#' simulated doublets of that pair alone. When the score dimension is large
+#' relative to those samples the estimates are noisy, and the noise is worst
+#' exactly where the data are thinnest.
+#'
+#' With `eb = TRUE` (the default) each pair covariance is blended toward a
+#' target predicted from the two constituents' *singlet* models,
+#' \deqn{\Sigma_{eb} = (1-\lambda)\,\Sigma_{lw} + \lambda\,\Sigma_0,}
+#' where \eqn{\Sigma_0} follows from the fact that a doublet's counts are the sum
+#' of its constituents', so its score vector is approximately a depth-weighted
+#' mixture of theirs. Because every type appears in many pairs, its singlet model
+#' is estimated from far more cells than any single pair model, which is where
+#' the strength being borrowed comes from. Singlet models are never shrunk.
+#'
+#' `eb_lambda = "cv"` (the default) chooses the weight by cross-validated
+#' exact-pair accuracy on the simulated doublets, whose constituents are known by
+#' construction — so no ground truth is needed, and the procedure can return
+#' \eqn{\lambda = 0}, declining to shrink on data where shrinkage would not help.
+#' It does exactly that on datasets whose pair covariances are already
+#' well-determined. Supply a number to fix the weight instead; `eb = FALSE`
+#' restores the previous Ledoit-Wolf-only behaviour exactly.
+#'
+#' Two cautions. **`eb_grid` should not be widened above 0.75 without re-deriving
+#' the shrinkage path**: the cross-validation criterion frequently selects the
+#' largest value offered, and beyond this range composition accuracy degrades —
+#' the ceiling is a guard, not a default. And `eb_grid` must contain 0, since
+#' that is what lets the procedure decline. Selection costs roughly two minutes
+#' for a reference of twenty types and scales with the number of pairs; set
+#' `eb_lambda` to a number to skip it.
+#'
+#' The chosen weight and the cross-validation curve are recorded in `info$eb`.
+#'
 #' @export
 compose <- function(query, reference, phenotypes, hc_singlets,
                     hc_labels = NULL, detector = "builtin",
@@ -136,6 +182,9 @@ compose <- function(query, reference, phenotypes, hc_singlets,
                     candidates = c("all5", "flex2", "fix1"),
                     output = c("top1", "topk", "conformal"),
                     k = 3L, alpha = 0.10, seed = 1L,
+                    eb = TRUE, eb_lambda = "cv",
+                    eb_grid = c(0, 0.25, 0.5, 0.75), eb_R = 2000L,
+                    eb_nfold = 5L,
                     score_fn = score_phispace) {
   .validate_counts(query)
   candidates <- match.arg(candidates)
@@ -218,6 +267,24 @@ compose <- function(query, reference, phenotypes, hc_singlets,
   S_dbl <- S_join[n_sing + seq_len(ncol(sim$counts)), , drop = FALSE]
 
   mods <- fit_doublet_models(S_sing, hc_labels, S_dbl, sim$pair_label, types)
+
+  # Empirical-Bayes shrinkage of the PAIR covariances (M2f). Singlet models are
+  # left alone deliberately. lambda is selected once, on the primary annotation
+  # level, by cross-validated exact-pair accuracy over the simulated doublets;
+  # any additional levels reuse that value rather than fitting their own, so the
+  # object carries a single, interpretable shrinkage weight.
+  eb_info <- NULL
+  if (isTRUE(eb)) {
+    lib_sing <- as.numeric(Matrix::colSums(cnt[, hc_idx, drop = FALSE]))
+    eb_fit <- apply_eb_pairs(mods, S_sing, hc_labels, S_dbl, sim$pair_label,
+                             lib_sing, lambda = eb_lambda, grid = eb_grid,
+                             R = eb_R, nfold = eb_nfold, seed = seed)
+    mods <- eb_fit$models
+    eb_info <- list(lambda = eb_fit$lambda, cv = eb_fit$cv, grid = eb_grid,
+                    requested = eb_lambda, n_shrunk = eb_fit$n_shrunk)
+  } else if (!identical(eb_lambda, "cv")) {
+    warning("`eb_lambda` is ignored when `eb = FALSE`.", call. = FALSE)
+  }
   if (!length(mods$pair_models)) {
     stop("No doublet-pair models could be fitted; increase `n_per_pair`.", call. = FALSE)
   }
@@ -246,6 +313,12 @@ compose <- function(query, reference, phenotypes, hc_singlets,
         Ss <- Sj[seq_len(n_sing), , drop = FALSE]
         Sd <- Sj[n_sing + seq_len(ncol(sim$counts)), , drop = FALSE]
         m <- fit_doublet_models(Ss, hc_labels, Sd, sim$pair_label, types)
+        if (!is.null(eb_info) && eb_info$lambda > 0) {
+          m <- apply_eb_pairs(m, Ss, hc_labels, Sd, sim$pair_label,
+                              as.numeric(Matrix::colSums(cnt[, hc_idx, drop = FALSE])),
+                              lambda = eb_info$lambda, grid = eb_grid,
+                              R = eb_R, seed = seed)$models
+        }
         if (!length(m$sing_models) || !length(m$pair_models)) {
           stop(sprintf("No usable models could be fitted for annotation level %d.", i),
                call. = FALSE)
@@ -344,6 +417,7 @@ compose <- function(query, reference, phenotypes, hc_singlets,
 
   detector_name <- if (is.character(detector)) detector else "byo"
   info <- list(
+    eb = eb_info,
     n_cells = ncol(cnt), n_hc_singlets = n_sing, types = types,
     phenotypes = phenotypes, detector = detector_name,
     detection_features = if (identical(detector, "builtin"))

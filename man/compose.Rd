@@ -18,6 +18,11 @@ compose(
   k = 3L,
   alpha = 0.1,
   seed = 1L,
+  eb = TRUE,
+  eb_lambda = "cv",
+  eb_grid = c(0, 0.25, 0.5, 0.75),
+  eb_R = 2000L,
+  eb_nfold = 5L,
   score_fn = score_phispace
 )
 }
@@ -52,6 +57,21 @@ numeric score vector. Numeric scores require \code{detector_threshold}.}
 
 \item{seed}{Non-negative integer controlling simulation, scoring, and training.}
 
+\item{eb}{Shrink the doublet-pair covariances toward a target predicted from
+the constituents' singlet models (default \code{TRUE}). \code{FALSE} restores the
+previous Ledoit-Wolf-only behaviour exactly.}
+
+\item{eb_lambda}{\code{"cv"} (default) to choose the shrinkage weight by
+cross-validated exact-pair accuracy on the simulated doublets, or a number
+in \verb{[0, 1]} to fix it. Cross-validation needs no ground truth, and can
+return 0, declining to shrink where shrinkage would not help.}
+
+\item{eb_grid}{Candidate weights for \code{eb_lambda = "cv"}; must contain 0.}
+
+\item{eb_R}{Monte-Carlo draws used to build each target.}
+
+\item{eb_nfold}{Cross-validation folds for \code{eb_lambda = "cv"}.}
+
 \item{score_fn}{Advanced scoring function with the same interface as
 \code{score_phispace()}.}
 }
@@ -66,3 +86,40 @@ cell-type pairs. The built-in detector combines PhiSpace score features with
 library-size features. Composition is calculated for every query cell; use
 \code{flag} to select calls made by the chosen detector.
 }
+\section{Shrinkage of the doublet-pair covariances}{
+
+
+Each pair model needs a covariance over the cell-type score vector, and a
+reference with \code{T} types has \code{T(T-1)/2} pairs to estimate, each from the
+simulated doublets of that pair alone. When the score dimension is large
+relative to those samples the estimates are noisy, and the noise is worst
+exactly where the data are thinnest.
+
+With \code{eb = TRUE} (the default) each pair covariance is blended toward a
+target predicted from the two constituents' \emph{singlet} models,
+\deqn{\Sigma_{eb} = (1-\lambda)\,\Sigma_{lw} + \lambda\,\Sigma_0,}
+where \eqn{\Sigma_0} follows from the fact that a doublet's counts are the sum
+of its constituents', so its score vector is approximately a depth-weighted
+mixture of theirs. Because every type appears in many pairs, its singlet model
+is estimated from far more cells than any single pair model, which is where
+the strength being borrowed comes from. Singlet models are never shrunk.
+
+\code{eb_lambda = "cv"} (the default) chooses the weight by cross-validated
+exact-pair accuracy on the simulated doublets, whose constituents are known by
+construction — so no ground truth is needed, and the procedure can return
+\eqn{\lambda = 0}, declining to shrink on data where shrinkage would not help.
+It does exactly that on datasets whose pair covariances are already
+well-determined. Supply a number to fix the weight instead; \code{eb = FALSE}
+restores the previous Ledoit-Wolf-only behaviour exactly.
+
+Two cautions. \strong{\code{eb_grid} should not be widened above 0.75 without re-deriving
+the shrinkage path}: the cross-validation criterion frequently selects the
+largest value offered, and beyond this range composition accuracy degrades —
+the ceiling is a guard, not a default. And \code{eb_grid} must contain 0, since
+that is what lets the procedure decline. Selection costs roughly two minutes
+for a reference of twenty types and scales with the number of pairs; set
+\code{eb_lambda} to a number to skip it.
+
+The chosen weight and the cross-validation curve are recorded in \code{info$eb}.
+}
+
