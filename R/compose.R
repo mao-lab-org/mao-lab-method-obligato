@@ -143,10 +143,10 @@ compose_pairs <- function(S, pair_models, flagged = NULL,
 #' @param eb Shrink the doublet-pair covariances toward a target predicted from
 #'   the constituents' singlet models (default `TRUE`). `FALSE` restores the
 #'   previous Ledoit-Wolf-only behaviour exactly.
-#' @param eb_lambda `"cv"` (default) to choose the shrinkage weight by
-#'   cross-validated exact-pair accuracy on the simulated doublets, or a number
-#'   in `[0, 1]` to fix it. Cross-validation needs no ground truth, and can
-#'   return 0, declining to shrink where shrinkage would not help.
+#' @param eb_lambda A number in `[0, 1]` fixing the shrinkage weight (default
+#'   `0.75`), or `"cv"` to choose it by cross-validated detection AUPRC on the
+#'   simulated doublets. Cross-validation needs no ground truth and can return 0,
+#'   declining to shrink; see the caution below on what it can resolve.
 #' @param eb_grid Candidate weights for `eb_lambda = "cv"`; must contain 0.
 #' @param eb_R Monte-Carlo draws used to build each target.
 #' @param eb_nfold Cross-validation folds for `eb_lambda = "cv"`.
@@ -172,21 +172,35 @@ compose_pairs <- function(S, pair_models, flagged = NULL,
 #' is estimated from far more cells than any single pair model, which is where
 #' the strength being borrowed comes from. Singlet models are never shrunk.
 #'
-#' `eb_lambda = "cv"` (the default) chooses the weight by cross-validated
-#' exact-pair accuracy on the simulated doublets, whose constituents are known by
-#' construction — so no ground truth is needed, and the procedure can return
-#' \eqn{\lambda = 0}, declining to shrink on data where shrinkage would not help.
-#' It does exactly that on datasets whose pair covariances are already
-#' well-determined. Supply a number to fix the weight instead; `eb = FALSE`
-#' restores the previous Ledoit-Wolf-only behaviour exactly.
+#' **The shrunk models are used for the detection features only.** Composition is
+#' computed from the unshrunk models, so `compose()` returns identical
+#' composition calls with and without `eb`. That split is empirical: across the
+#' three benchmark datasets shrinkage improves detection at every weight tested
+#' (+0.5 to +1.3 percentage points of AUPRC) and does not improve deconvolution
+#' (-0.31, -0.03 and 0.00 points, none significant). The mechanism is that
+#' shrinking a pair toward a target built from its own constituents stabilises
+#' the *level* of the pair likelihood, which detection consumes as scalar
+#' features, while making different pairs more alike — which is precisely what
+#' the arg-max across pairs has to separate.
 #'
-#' Two cautions. **`eb_grid` should not be widened above 0.75 without re-deriving
-#' the shrinkage path**: the cross-validation criterion frequently selects the
-#' largest value offered, and beyond this range composition accuracy degrades —
-#' the ceiling is a guard, not a default. And `eb_grid` must contain 0, since
-#' that is what lets the procedure decline. Selection costs roughly two minutes
-#' for a reference of twenty types and scales with the number of pairs; set
-#' `eb_lambda` to a number to skip it.
+#' The default weight is fixed at `0.75` rather than cross-validated. The
+#' detection response is flat between about 0.7 and 0.9, so a fixed value costs
+#' little against per-dataset tuning, and 0.75 keeps a margin from
+#' \eqn{\lambda = 1}, where the pair's own simulated doublets stop contributing
+#' altogether and within-lineage detection degrades sharply (up to -8 points of
+#' AUPRC on one benchmark dataset).
+#'
+#' `eb_lambda = "cv"` selects the weight by cross-validated **detection AUPRC**,
+#' matching the task the shrinkage is used for. Be aware of its resolution: it
+#' detects reliably that shrinkage helps — the deficit at \eqn{\lambda = 0} is
+#' around four times the fold-to-fold standard deviation — but across
+#' \eqn{\lambda \ge 0.5} the spread is about the size of that standard
+#' deviation, so the selected value in that region is close to arbitrary and can
+#' land on the endpoint. It is offered as an option, not as the default, and it
+#' costs a detector refit per fold per grid point.
+#'
+#' `eb_grid` must contain 0, since that is what lets the procedure decline to
+#' shrink. `eb = FALSE` restores the previous Ledoit-Wolf-only behaviour exactly.
 #'
 #' The chosen weight and the cross-validation curve are recorded in `info$eb`.
 #'
@@ -197,8 +211,8 @@ compose <- function(query, reference, phenotypes, hc_singlets,
                     candidates = c("all5", "flex2", "fix1"),
                     output = c("top1", "topk", "conformal"),
                     k = 3L, alpha = 0.10, seed = 1L,
-                    eb = TRUE, eb_lambda = "cv",
-                    eb_grid = c(0, 0.25, 0.5, 0.75), eb_R = 2000L,
+                    eb = TRUE, eb_lambda = 0.75,
+                    eb_grid = seq(0, 1, by = 0.1), eb_R = 2000L,
                     eb_nfold = 5L,
                     score_fn = score_phispace) {
   .validate_counts(query)
@@ -283,21 +297,29 @@ compose <- function(query, reference, phenotypes, hc_singlets,
 
   mods <- fit_doublet_models(S_sing, hc_labels, S_dbl, sim$pair_label, types)
 
-  # Empirical-Bayes shrinkage of the PAIR covariances (M2f). Singlet models are
-  # left alone deliberately. lambda is selected once, on the primary annotation
-  # level, by cross-validated exact-pair accuracy over the simulated doublets;
-  # any additional levels reuse that value rather than fitting their own, so the
-  # object carries a single, interpretable shrinkage weight.
+  # Empirical-Bayes shrinkage of the PAIR covariances is applied to the DETECTION
+  # path only, and is set up inside the detector branch below. `mods` stays
+  # UNSHRUNK here and is what compose_pairs() and the returned object use, so
+  # composition output is identical with and without `eb`.
+  #
+  # Measured on the three benchmark datasets: shrinkage improves detection at
+  # every step of lambda (+0.5 to +1.3 pp AUPRC) and does not improve
+  # deconvolution (-0.31 / -0.03 / 0.00 pp, none significant). Shrinking toward a
+  # target built from a pair's own constituents stabilises the LEVEL of the pair
+  # likelihood -- which detection consumes as scalar features -- while making
+  # pairs more alike, which is what the arg-max across pairs must separate.
   eb_info <- NULL
-  if (isTRUE(eb)) {
-    lib_sing <- as.numeric(Matrix::colSums(cnt[, hc_idx, drop = FALSE]))
-    eb_fit <- apply_eb_pairs(mods, S_sing, hc_labels, S_dbl, sim$pair_label,
-                             lib_sing, lambda = eb_lambda, grid = eb_grid,
-                             R = eb_R, nfold = eb_nfold, seed = seed)
-    mods <- eb_fit$models
-    eb_info <- list(lambda = eb_fit$lambda, cv = eb_fit$cv, grid = eb_grid,
-                    requested = eb_lambda, n_shrunk = eb_fit$n_shrunk)
-  } else if (!identical(eb_lambda, "cv")) {
+  if (!identical(eb_lambda, "cv") &&
+      (!is.numeric(eb_lambda) || length(eb_lambda) != 1L || is.na(eb_lambda) ||
+       eb_lambda < 0 || eb_lambda > 1)) {
+    stop("`eb_lambda` must be \"cv\" or a single number in [0, 1].", call. = FALSE)
+  }
+  if (!0 %in% eb_grid) {
+    stop("`eb_grid` must contain 0, so that shrinkage can be declined.", call. = FALSE)
+  }
+  # Only warn if the weight was actually set: the default is now a number, so
+  # comparing against "cv" would fire for anyone who merely passed eb = FALSE.
+  if (!isTRUE(eb) && !identical(eb_lambda, .EB_LAMBDA_DEFAULT)) {
     warning("`eb_lambda` is ignored when `eb = FALSE`.", call. = FALSE)
   }
   if (!length(mods$pair_models)) {
@@ -312,37 +334,69 @@ compose <- function(query, reference, phenotypes, hc_singlets,
     }
     n_levels <- length(phenotypes)
     suffix <- function(i) if (n_levels > 1L) paste0("_l", i) else ""
-    level_features <- function(i) {
-      if (i == 1L) {
-        Sa <- S_all; Ss <- S_sing; Sd <- S_dbl; m <- mods
+
+    # Score every annotation level ONCE. Model fitting is separated from scoring
+    # so that the cross-validation below can refit models per fold without
+    # re-scoring, which is the expensive part.
+    level_scores <- function(i) {
+      if (i == 1L) return(list(Sa = S_all, Ss = S_sing, Sd = S_dbl))
+      Sa <- .with_seed(seed + 100L + i,
+        score_fn(cnt, refs[[i]], phenotypes[[i]], sprintf(" all-cells L%d", i)))
+      Sa <- .validate_scores(Sa, ncol(cnt), sprintf("Query scores for level %d", i))
+      Sj <- .with_seed(seed + 200L + i,
+        score_fn(joint_counts, refs[[i]], phenotypes[[i]],
+                 sprintf(" train-joint L%d", i)))
+      Sj <- .validate_scores(Sj, ncol(joint_counts),
+                             sprintf("Training scores for level %d", i),
+                             expected = colnames(Sa))
+      list(Sa = Sa,
+           Ss = Sj[seq_len(n_sing), , drop = FALSE],
+           Sd = Sj[n_sing + seq_len(ncol(sim$counts)), , drop = FALSE])
+    }
+    lvl <- lapply(seq_len(n_levels), level_scores)
+
+    # Select the shrinkage weight for the detection features.
+    eb_lam <- 0
+    if (isTRUE(eb)) {
+      lib_sing <- as.numeric(Matrix::colSums(cnt[, hc_idx, drop = FALSE]))
+      if (identical(eb_lambda, "cv")) {
+        sel <- .cv_lambda_detection(lvl, hc_labels, sim$pair_label, types,
+                                    cnt[, hc_idx, drop = FALSE], sim$counts,
+                                    lib_sing, grid = eb_grid, R = eb_R,
+                                    nfold = eb_nfold, seed = seed,
+                                    suffix = suffix)
+        eb_lam <- sel$lambda
+        eb_info <- list(lambda = eb_lam, cv = sel$cv, grid = eb_grid,
+                        requested = "cv", criterion = "detection_auprc",
+                        applies_to = "detection", n_shrunk = NA_integer_)
       } else {
-        Sa <- .with_seed(seed + 100L + i,
-          score_fn(cnt, refs[[i]], phenotypes[[i]], sprintf(" all-cells L%d", i)))
-        Sa <- .validate_scores(Sa, ncol(cnt), sprintf("Query scores for level %d", i))
-        Sj <- .with_seed(seed + 200L + i,
-          score_fn(joint_counts, refs[[i]], phenotypes[[i]],
-                   sprintf(" train-joint L%d", i)))
-        Sj <- .validate_scores(Sj, ncol(joint_counts),
-                               sprintf("Training scores for level %d", i),
-                               expected = colnames(Sa))
-        Ss <- Sj[seq_len(n_sing), , drop = FALSE]
-        Sd <- Sj[n_sing + seq_len(ncol(sim$counts)), , drop = FALSE]
-        m <- fit_doublet_models(Ss, hc_labels, Sd, sim$pair_label, types)
-        if (!is.null(eb_info) && eb_info$lambda > 0) {
-          m <- apply_eb_pairs(m, Ss, hc_labels, Sd, sim$pair_label,
+        eb_lam <- eb_lambda
+        eb_info <- list(lambda = eb_lam, cv = NULL, grid = eb_grid,
+                        requested = eb_lambda, criterion = "fixed",
+                        applies_to = "detection", n_shrunk = NA_integer_)
+      }
+    }
+
+    level_features <- function(i) {
+      L <- lvl[[i]]
+      m <- if (i == 1L) mods else
+        fit_doublet_models(L$Ss, hc_labels, L$Sd, sim$pair_label, types)
+      if (eb_lam > 0) {
+        fit <- apply_eb_pairs(m, L$Ss, hc_labels, L$Sd, sim$pair_label,
                               as.numeric(Matrix::colSums(cnt[, hc_idx, drop = FALSE])),
-                              lambda = eb_info$lambda, grid = eb_grid,
-                              R = eb_R, seed = seed)$models
-        }
-        if (!length(m$sing_models) || !length(m$pair_models)) {
-          stop(sprintf("No usable models could be fitted for annotation level %d.", i),
-               call. = FALSE)
-        }
+                              lambda = eb_lam, grid = eb_grid,
+                              R = eb_R, seed = seed)
+        m <- fit$models
+        if (i == 1L) eb_info$n_shrunk <<- fit$n_shrunk
+      }
+      if (!length(m$sing_models) || !length(m$pair_models)) {
+        stop(sprintf("No usable models could be fitted for annotation level %d.", i),
+             call. = FALSE)
       }
       list(
-        sing = compute_features(Ss, m$sing_models, m$pair_models, suffix(i)),
-        dbl = compute_features(Sd, m$sing_models, m$pair_models, suffix(i)),
-        all = compute_features(Sa, m$sing_models, m$pair_models, suffix(i)),
+        sing = compute_features(L$Ss, m$sing_models, m$pair_models, suffix(i)),
+        dbl = compute_features(L$Sd, m$sing_models, m$pair_models, suffix(i)),
+        all = compute_features(L$Sa, m$sing_models, m$pair_models, suffix(i)),
         models = m)
     }
     parts <- lapply(seq_len(n_levels), level_features)

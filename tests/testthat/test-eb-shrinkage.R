@@ -222,3 +222,82 @@ test_that("compose_pairs errors when model names and score columns disagree", {
                              output = "top1"),
     "same cell-type vocabulary")
 })
+
+# --- EB applies to DETECTION ONLY -------------------------------------------
+# The invariant that makes the detection/composition split real: shrinkage may
+# move the detection scores, and must not move a single composition call.
+
+.ebd_scorer <- function(counts, reference, phenotypes, label = "") {
+  types <- sort(unique(as.character(reference[[phenotypes]])))
+  M <- outer(seq_len(ncol(counts)), seq_along(types),
+             function(i, j) 0.9 * sin(0.3 * i + 0.7 * j + 0.05 * i * j))
+  colnames(M) <- types
+  M
+}
+
+.ebd_setup <- function() {
+  types <- LETTERS[1:6]
+  set.seed(25)
+  query <- matrix(rpois(40 * 200, 3), 40, 200,
+                  dimnames = list(paste0("g", 1:40), paste0("c", 1:200)))
+  hc <- rep(FALSE, 200); hc[1:120] <- TRUE
+  list(query = query, reference = list(celltype = rep(types, 50)),
+       hc = hc, labels = rep(types, each = 20))
+}
+
+test_that("eb does not change composition, only detection", {
+  s <- .ebd_setup()
+  run <- function(...) compose(s$query, s$reference, "celltype", s$hc, s$labels,
+                               n_per_pair = 30, score_fn = .ebd_scorer, ...)
+  off <- run(eb = FALSE)
+  on  <- run(eb = TRUE, eb_lambda = 0.75)
+
+  expect_identical(off$composition, on$composition)
+  expect_identical(off$models, on$models)   # returned models stay unshrunk
+  expect_identical(on$info$eb$applies_to, "detection")
+  expect_identical(on$info$eb$lambda, 0.75)
+})
+
+test_that("the weight reaches the detection models and not the composition ones", {
+  # Assert on the models, not on the classifier output: on a fixture this small
+  # and this synthetic the detection scores span 0.009-0.094 and xgboost builds
+  # identical trees either way, so a score comparison would test the classifier's
+  # sensitivity rather than the wiring.
+  s <- .ebd_setup()
+  run <- function(l) compose(s$query, s$reference, "celltype", s$hc, s$labels,
+                             n_per_pair = 30, score_fn = .ebd_scorer,
+                             eb = TRUE, eb_lambda = l)
+  a <- run(0); b <- run(0.9)
+
+  pa <- a$detection_model$level_models[[1L]]$pair_models
+  pb <- b$detection_model$level_models[[1L]]$pair_models
+  expect_gt(length(pa), 0L)
+  same <- vapply(names(pa), function(n) isTRUE(all.equal(pa[[n]], pb[[n]])),
+                 logical(1))
+  expect_true(!any(same))                      # detection path IS shrunk
+
+  expect_identical(a$models, b$models)          # composition path is NOT
+  expect_identical(a$composition, b$composition)
+})
+
+test_that("eb_lambda is validated, and eb = FALSE alone does not warn", {
+  s <- .ebd_setup()
+  expect_error(
+    compose(s$query, s$reference, "celltype", s$hc, s$labels, n_per_pair = 30,
+            score_fn = .ebd_scorer, eb_lambda = 1.5),
+    "must be")
+  expect_error(
+    compose(s$query, s$reference, "celltype", s$hc, s$labels, n_per_pair = 30,
+            score_fn = .ebd_scorer, eb_grid = c(0.25, 0.5)),
+    "must contain 0")
+  expect_silent(
+    compose(s$query, s$reference, "celltype", s$hc, s$labels, n_per_pair = 30,
+            score_fn = .ebd_scorer, eb = FALSE, detector = "none"))
+})
+
+test_that("the documented default and the internal constant do not drift apart", {
+  # `eb_lambda`'s formal is written as a literal so that ?compose shows 0.75
+  # rather than a symbol; the warning path compares against the constant. They
+  # must agree.
+  expect_identical(eval(formals(compose)$eb_lambda), Obligato:::.EB_LAMBDA_DEFAULT)
+})

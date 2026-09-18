@@ -19,8 +19,8 @@ compose(
   alpha = 0.1,
   seed = 1L,
   eb = TRUE,
-  eb_lambda = "cv",
-  eb_grid = c(0, 0.25, 0.5, 0.75),
+  eb_lambda = 0.75,
+  eb_grid = seq(0, 1, by = 0.1),
   eb_R = 2000L,
   eb_nfold = 5L,
   score_fn = score_phispace
@@ -61,10 +61,10 @@ numeric score vector. Numeric scores require \code{detector_threshold}.}
 the constituents' singlet models (default \code{TRUE}). \code{FALSE} restores the
 previous Ledoit-Wolf-only behaviour exactly.}
 
-\item{eb_lambda}{\code{"cv"} (default) to choose the shrinkage weight by
-cross-validated exact-pair accuracy on the simulated doublets, or a number
-in \verb{[0, 1]} to fix it. Cross-validation needs no ground truth, and can
-return 0, declining to shrink where shrinkage would not help.}
+\item{eb_lambda}{A number in \verb{[0, 1]} fixing the shrinkage weight (default
+\code{0.75}), or \code{"cv"} to choose it by cross-validated detection AUPRC on the
+simulated doublets. Cross-validation needs no ground truth and can return 0,
+declining to shrink; see the caution below on what it can resolve.}
 
 \item{eb_grid}{Candidate weights for \code{eb_lambda = "cv"}; must contain 0.}
 
@@ -104,21 +104,35 @@ mixture of theirs. Because every type appears in many pairs, its singlet model
 is estimated from far more cells than any single pair model, which is where
 the strength being borrowed comes from. Singlet models are never shrunk.
 
-\code{eb_lambda = "cv"} (the default) chooses the weight by cross-validated
-exact-pair accuracy on the simulated doublets, whose constituents are known by
-construction — so no ground truth is needed, and the procedure can return
-\eqn{\lambda = 0}, declining to shrink on data where shrinkage would not help.
-It does exactly that on datasets whose pair covariances are already
-well-determined. Supply a number to fix the weight instead; \code{eb = FALSE}
-restores the previous Ledoit-Wolf-only behaviour exactly.
+\strong{The shrunk models are used for the detection features only.} Composition is
+computed from the unshrunk models, so \code{compose()} returns identical
+composition calls with and without \code{eb}. That split is empirical: across the
+three benchmark datasets shrinkage improves detection at every weight tested
+(+0.5 to +1.3 percentage points of AUPRC) and does not improve deconvolution
+(-0.31, -0.03 and 0.00 points, none significant). The mechanism is that
+shrinking a pair toward a target built from its own constituents stabilises
+the \emph{level} of the pair likelihood, which detection consumes as scalar
+features, while making different pairs more alike — which is precisely what
+the arg-max across pairs has to separate.
 
-Two cautions. \strong{\code{eb_grid} should not be widened above 0.75 without re-deriving
-the shrinkage path}: the cross-validation criterion frequently selects the
-largest value offered, and beyond this range composition accuracy degrades —
-the ceiling is a guard, not a default. And \code{eb_grid} must contain 0, since
-that is what lets the procedure decline. Selection costs roughly two minutes
-for a reference of twenty types and scales with the number of pairs; set
-\code{eb_lambda} to a number to skip it.
+The default weight is fixed at \code{0.75} rather than cross-validated. The
+detection response is flat between about 0.7 and 0.9, so a fixed value costs
+little against per-dataset tuning, and 0.75 keeps a margin from
+\eqn{\lambda = 1}, where the pair's own simulated doublets stop contributing
+altogether and within-lineage detection degrades sharply (up to -8 points of
+AUPRC on one benchmark dataset).
+
+\code{eb_lambda = "cv"} selects the weight by cross-validated \strong{detection AUPRC},
+matching the task the shrinkage is used for. Be aware of its resolution: it
+detects reliably that shrinkage helps — the deficit at \eqn{\lambda = 0} is
+around four times the fold-to-fold standard deviation — but across
+\eqn{\lambda \ge 0.5} the spread is about the size of that standard
+deviation, so the selected value in that region is close to arbitrary and can
+land on the endpoint. It is offered as an option, not as the default, and it
+costs a detector refit per fold per grid point.
+
+\code{eb_grid} must contain 0, since that is what lets the procedure decline to
+shrink. \code{eb = FALSE} restores the previous Ledoit-Wolf-only behaviour exactly.
 
 The chosen weight and the cross-validation curve are recorded in \code{info$eb}.
 }

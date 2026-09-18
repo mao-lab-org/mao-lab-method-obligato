@@ -1,3 +1,9 @@
+# Default empirical-Bayes weight for the detection features. Fixed rather than
+# cross-validated: the detection response is flat over roughly 0.7-0.9, and 0.75
+# keeps a margin from lambda = 1, where the pair's own simulated doublets stop
+# contributing and within-lineage detection degrades sharply.
+.EB_LAMBDA_DEFAULT <- 0.75
+
 # Empirical-Bayes shrinkage of the doublet-pair covariances (M2f).
 #
 # Each pair covariance is blended toward a structured target built from the two
@@ -198,4 +204,89 @@ apply_eb_pairs <- function(models, S_sing, sing_labels, S_dbl, dbl_pair,
     if (!is.null(m)) { models$pair_models[[pl]] <- m; n_done <- n_done + 1L }
   }
   list(models = models, lambda = lambda, cv = cv, n_shrunk = n_done)
+}
+
+#' Cross-validate the EB weight on a detection objective
+#'
+#' The composition criterion in [.cv_lambda_accuracy()] selects `lambda` on
+#' exact-pair accuracy. When the shrunk models are used only to build detection
+#' features -- which is what [compose()] does -- that optimises a task the weight
+#' is not applied to. This is the matching criterion: each held-out fold is scored
+#' with detection AUPRC, using the same feature block and classifier the shipped
+#' pipeline uses.
+#'
+#' Pair models are refitted inside every fold, on the training folds only.
+#' Selecting `lambda` against models that had already seen the held-out simulated
+#' doublets would leak, and would systematically flatter larger `lambda`.
+#'
+#' Be aware of what this criterion can and cannot resolve. Measured on the three
+#' benchmark datasets, it detects reliably that shrinkage helps -- the deficit at
+#' `lambda = 0` is around four times the fold-to-fold standard deviation -- but
+#' across `lambda >= 0.5` the spread is roughly the size of that standard
+#' deviation, so the arg-max in that region is close to arbitrary. It is offered
+#' as an option, not as the default.
+#'
+#' @param levels List with one entry per annotation level, each a list with
+#'   `Ss` (singlet scores) and `Sd` (simulated-doublet scores).
+#' @param sing_labels,dbl_pair Labels for the singlets and the simulated pairs.
+#' @param types Reference type vocabulary.
+#' @param cnt_sing,cnt_dbl Counts for the singlets and simulated doublets, for
+#'   the library-size feature block.
+#' @param lib_sing Singlet library sizes, for the EB target.
+#' @param grid Candidate weights; must contain 0.
+#' @param R,nfold,seed,min_pair As in [apply_eb_pairs()].
+#' @param suffix Function mapping a level index to its feature-name suffix.
+#' @return A list with the selected `lambda` and the `cv` curve over `grid`.
+#' @keywords internal
+#' @noRd
+.cv_lambda_detection <- function(levels, sing_labels, dbl_pair, types,
+                                 cnt_sing, cnt_dbl, lib_sing, grid,
+                                 R = 2000L, nfold = 5L, seed = 1L,
+                                 suffix = function(i) "", min_pair = 30L) {
+  n_s <- nrow(levels[[1L]]$Ss); n_d <- nrow(levels[[1L]]$Sd)
+  fold_s <- .with_seed(seed + 2L, sample(rep_len(seq_len(nfold), n_s)))
+  fold_d <- .with_seed(seed + 3L, sample(rep_len(seq_len(nfold), n_d)))
+
+  one_fold <- function(lambda, f) {
+    tr_s <- which(fold_s != f); te_s <- which(fold_s == f)
+    tr_d <- which(fold_d != f); te_d <- which(fold_d == f)
+    if (!length(te_s) || !length(te_d)) return(NA_real_)
+    F <- list(str = list(), dtr = list(), ste = list(), dte = list())
+    for (i in seq_along(levels)) {
+      L <- levels[[i]]
+      m <- fit_doublet_models(L$Ss[tr_s, , drop = FALSE], sing_labels[tr_s],
+                              L$Sd[tr_d, , drop = FALSE], dbl_pair[tr_d], types)
+      if (!length(m$sing_models) || !length(m$pair_models)) return(NA_real_)
+      if (lambda > 0) {
+        m <- apply_eb_pairs(m, L$Ss[tr_s, , drop = FALSE], sing_labels[tr_s],
+                            L$Sd[tr_d, , drop = FALSE], dbl_pair[tr_d],
+                            lib_sing[tr_s], lambda = lambda, grid = grid,
+                            R = R, seed = seed, min_pair = min_pair)$models
+      }
+      sfx <- suffix(i)
+      F$str[[i]] <- compute_features(L$Ss[tr_s, , drop = FALSE], m$sing_models, m$pair_models, sfx)
+      F$dtr[[i]] <- compute_features(L$Sd[tr_d, , drop = FALSE], m$sing_models, m$pair_models, sfx)
+      F$ste[[i]] <- compute_features(L$Ss[te_s, , drop = FALSE], m$sing_models, m$pair_models, sfx)
+      F$dte[[i]] <- compute_features(L$Sd[te_d, , drop = FALSE], m$sing_models, m$pair_models, sfx)
+    }
+    S1 <- levels[[1L]]$Ss; D1 <- levels[[1L]]$Sd
+    # the type-median baseline is a training-fold quantity too
+    tm <- libsize_type_medians(cnt_sing[, tr_s, drop = FALSE], S1[tr_s, , drop = FALSE])
+    lb <- function(x, sc) libsize_features(x, top1_type(sc), tm)
+    f_str <- cbind(do.call(cbind, F$str), lb(cnt_sing[, tr_s, drop = FALSE], S1[tr_s, , drop = FALSE]))
+    f_dtr <- cbind(do.call(cbind, F$dtr), lb(cnt_dbl[, tr_d, drop = FALSE], D1[tr_d, , drop = FALSE]))
+    f_ste <- cbind(do.call(cbind, F$ste), lb(cnt_sing[, te_s, drop = FALSE], S1[te_s, , drop = FALSE]))
+    f_dte <- cbind(do.call(cbind, F$dte), lb(cnt_dbl[, te_d, drop = FALSE], D1[te_d, , drop = FALSE]))
+    bst <- train_detector(f_str, f_dtr, seed = seed)
+    p <- as.numeric(stats::predict(bst, as.matrix(rbind(f_ste, f_dte))))
+    y <- c(rep(0L, nrow(f_ste)), rep(1L, nrow(f_dte)))
+    compute_auprc(y, p)$auprc
+  }
+
+  cv <- vapply(grid, function(l)
+    mean(vapply(seq_len(nfold), function(f) one_fold(l, f), numeric(1)), na.rm = TRUE),
+    numeric(1))
+  names(cv) <- as.character(grid)
+  lambda <- if (all(!is.finite(cv))) 0 else grid[which.max(replace(cv, !is.finite(cv), -Inf))]
+  list(lambda = lambda, cv = cv)
 }
