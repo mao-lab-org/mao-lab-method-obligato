@@ -23,6 +23,7 @@ compose(
   eb_grid = seq(0, 1, by = 0.1),
   eb_R = 2000L,
   eb_nfold = 5L,
+  store_features = TRUE,
   score_fn = score_phispace
 )
 }
@@ -72,12 +73,21 @@ declining to shrink; see the caution below on what it can resolve.}
 
 \item{eb_nfold}{Cross-validation folds for \code{eb_lambda = "cv"}.}
 
+\item{store_features}{Keep the per-droplet detection features in the result
+(default \code{TRUE}). The features are computed either way when the built-in
+detector is used; storing them costs roughly
+\code{(7 * levels + 3) * ncol(query) * 8} bytes, about 1.4 MB for 10,000
+droplets at two annotation levels and 140 MB at one million. Set \code{FALSE}
+for very large queries. With a supplied \code{detector} the features are not
+otherwise needed, so \code{TRUE} adds one pair-likelihood pass.}
+
 \item{score_fn}{Advanced scoring function with the same interface as
 \code{score_phispace()}.}
 }
 \value{
 An \code{obligato_composition} object containing composition calls,
-detection scores and flags, fitted composition models, parameters, and provenance.
+detection scores and flags, the per-droplet detection features, fitted
+composition models, parameters, and provenance.
 }
 \description{
 Scores a count matrix against one or more labelled references, learns
@@ -86,6 +96,30 @@ cell-type pairs. The built-in detector combines PhiSpace score features with
 library-size features. Composition is calculated for every query cell; use
 \code{flag} to select calls made by the chosen detector.
 }
+\section{Per-droplet detection features}{
+
+
+\code{detection_features} holds one row per query droplet, row-named by droplet,
+in query column order. Alongside the score summaries and the three
+library-size features it carries \code{sing_LL}, \code{dbl_LL} and their difference
+\code{ll_diff}: how much better the best two-type model explains a droplet than
+the best one-type model. That quantity answers a question the library-size
+statistic cannot, namely whether a droplet of entirely ordinary size is
+doublet-like at all, and it is the basis for judging whether a group of calls
+is supported.
+
+\code{ll_diff} compares the best pair over all pairs against the best singlet. To
+assess the pair that was actually reported instead, subtract \code{sing_LL} from
+the \code{ll} of that droplet's row in \code{composition}; the two differ whenever the
+reported pair is not the global maximum, which the candidate rule does not
+guarantee.
+
+With a supplied \code{detector}, only the primary annotation level contributes.
+The per-level models exist solely inside the built-in detector's path, and
+the composition models are keyed on the primary level's types, so a second
+level's scores cannot be evaluated against them.
+}
+
 \section{Shrinkage of the doublet-pair covariances}{
 
 

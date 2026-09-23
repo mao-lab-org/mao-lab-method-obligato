@@ -150,10 +150,40 @@ compose_pairs <- function(S, pair_models, flagged = NULL,
 #' @param eb_grid Candidate weights for `eb_lambda = "cv"`; must contain 0.
 #' @param eb_R Monte-Carlo draws used to build each target.
 #' @param eb_nfold Cross-validation folds for `eb_lambda = "cv"`.
+#' @param store_features Keep the per-droplet detection features in the result
+#'   (default `TRUE`). The features are computed either way when the built-in
+#'   detector is used; storing them costs roughly
+#'   `(7 * levels + 3) * ncol(query) * 8` bytes, about 1.4 MB for 10,000
+#'   droplets at two annotation levels and 140 MB at one million. Set `FALSE`
+#'   for very large queries. With a supplied `detector` the features are not
+#'   otherwise needed, so `TRUE` adds one pair-likelihood pass.
 #' @param score_fn Advanced scoring function with the same interface as
 #'   `score_phispace()`.
 #' @return An `obligato_composition` object containing composition calls,
-#'   detection scores and flags, fitted composition models, parameters, and provenance.
+#'   detection scores and flags, the per-droplet detection features, fitted
+#'   composition models, parameters, and provenance.
+#'
+#' @section Per-droplet detection features:
+#'
+#' `detection_features` holds one row per query droplet, row-named by droplet,
+#' in query column order. Alongside the score summaries and the three
+#' library-size features it carries `sing_LL`, `dbl_LL` and their difference
+#' `ll_diff`: how much better the best two-type model explains a droplet than
+#' the best one-type model. That quantity answers a question the library-size
+#' statistic cannot, namely whether a droplet of entirely ordinary size is
+#' doublet-like at all, and it is the basis for judging whether a group of calls
+#' is supported.
+#'
+#' `ll_diff` compares the best pair over all pairs against the best singlet. To
+#' assess the pair that was actually reported instead, subtract `sing_LL` from
+#' the `ll` of that droplet's row in `composition`; the two differ whenever the
+#' reported pair is not the global maximum, which the candidate rule does not
+#' guarantee.
+#'
+#' With a supplied `detector`, only the primary annotation level contributes.
+#' The per-level models exist solely inside the built-in detector's path, and
+#' the composition models are keyed on the primary level's types, so a second
+#' level's scores cannot be evaluated against them.
 #'
 #' @section Shrinkage of the doublet-pair covariances:
 #'
@@ -213,7 +243,7 @@ compose <- function(query, reference, phenotypes, hc_singlets,
                     k = 3L, alpha = 0.10, seed = 1L,
                     eb = TRUE, eb_lambda = 0.75,
                     eb_grid = seq(0, 1, by = 0.1), eb_R = 2000L,
-                    eb_nfold = 5L,
+                    eb_nfold = 5L, store_features = TRUE,
                     score_fn = score_phispace) {
   .validate_counts(query)
   candidates <- match.arg(candidates)
@@ -221,6 +251,10 @@ compose <- function(query, reference, phenotypes, hc_singlets,
   n_per_pair <- .validate_scalar_integer(n_per_pair, "n_per_pair", 30L)
   seed <- .validate_scalar_integer(seed, "seed", 0L)
   k <- .validate_scalar_integer(k, "k", 1L)
+  if (!is.logical(store_features) || length(store_features) != 1L ||
+      is.na(store_features)) {
+    stop("`store_features` must be TRUE or FALSE.", call. = FALSE)
+  }
   if (!is.logical(hc_singlets) || length(hc_singlets) != ncol(query) ||
       anyNA(hc_singlets)) {
     stop("`hc_singlets` must be a non-missing logical vector with one value per cell.",
@@ -327,6 +361,14 @@ compose <- function(query, reference, phenotypes, hc_singlets,
   }
 
   det_score <- threshold <- flag <- detection_model <- NULL
+  # Per-droplet detection features. `ll_diff` here is the difference between the
+  # best pair log-likelihood and the best singlet log-likelihood, i.e. how much
+  # better a two-type model explains the droplet than any one-type model. It is
+  # computed for the detector and was previously discarded; retaining it is what
+  # lets a caller ask whether a group of calls is doublet-like at all, which the
+  # library-size statistic cannot answer for a droplet of ordinary size.
+  F_all <- NULL
+
   if (identical(detector, "builtin")) {
     if (!length(mods$sing_models)) {
       stop("No singlet models could be fitted; provide at least 15 cells for one type.",
@@ -447,6 +489,20 @@ compose <- function(query, reference, phenotypes, hc_singlets,
          call. = FALSE)
   }
 
+  # Supplied detector: the built-in branch above did not run, so the features do
+  # not exist yet. `mods` is fitted regardless because composition needs it, so
+  # they can still be produced -- at one extra pair-likelihood pass, which is why
+  # it is gated on the caller asking. Only the PRIMARY annotation level is
+  # available here: the per-level models and score matrices live inside the
+  # built-in branch, and `mods` is keyed on the primary level's types, so a
+  # second level's scores would be evaluated against the wrong label space.
+  if (is.null(F_all) && isTRUE(store_features) && !identical(detector, "none")) {
+    F_all <- cbind(
+      compute_features(S_all, mods$sing_models, mods$pair_models, ""),
+      libsize_features(cnt, top1_type(S_all),
+                       libsize_type_medians(cnt[, hc_idx, drop = FALSE], S_sing)))
+  }
+
   conformal <- NULL
   if (output == "conformal") {
     sim_cal <- simulate_training_doublets(
@@ -484,12 +540,24 @@ compose <- function(query, reference, phenotypes, hc_singlets,
                           output = output, k = k)
   }
 
+  # One row per query droplet, in query column order. `flag` and
+  # `detection_score` are unnamed vectors, so naming these rows is what makes a
+  # join to the composition table unambiguous rather than positional.
+  if (!is.null(F_all)) {
+    if (nrow(F_all) != ncol(cnt)) {
+      stop("Internal error: detection features have ", nrow(F_all),
+           " rows for ", ncol(cnt), " droplets.", call. = FALSE)
+    }
+    rownames(F_all) <- colnames(cnt)
+  }
+  if (!isTRUE(store_features)) F_all <- NULL
+
   detector_name <- if (is.character(detector)) detector else "byo"
   info <- list(
     eb = eb_info,
     n_cells = ncol(cnt), n_hc_singlets = n_sing, types = types,
     phenotypes = phenotypes, detector = detector_name,
-    detection_features = if (identical(detector, "builtin"))
+    detection_feature_source = if (identical(detector, "builtin"))
       "PhiSpace scores plus library size" else NULL,
     candidates = candidates, output = output, n_per_pair = n_per_pair,
     seed = seed, threshold = threshold,
@@ -497,6 +565,7 @@ compose <- function(query, reference, phenotypes, hc_singlets,
 
   structure(
     list(composition = comp, detection_score = det_score, flag = flag,
+         detection_features = F_all,
          conformal = conformal, models = mods,
          detection_model = detection_model, info = info,
          provenance = .package_provenance()),

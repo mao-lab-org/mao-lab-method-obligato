@@ -45,7 +45,7 @@ test_that("compose builtin detector returns composition + score + flag", {
   expect_true(is.logical(res$flag))
   expect_true(is.numeric(res$info$threshold))
   expect_false(is.null(res$detection_model))
-  expect_identical(res$info$detection_features, "PhiSpace scores plus library size")
+  expect_identical(res$info$detection_feature_source, "PhiSpace scores plus library size")
 })
 
 test_that("detector = 'none' composes without flagging", {
@@ -91,4 +91,39 @@ test_that("an invalid detector argument errors clearly", {
   s <- setup_query()
   expect_error(do.call(compose, common_args(s, detector = "magic")),
                "must be")
+})
+
+test_that("per-droplet detection features are returned and internally consistent", {
+  skip_if_not_installed("xgboost")
+  s <- setup_query()
+  res <- do.call(compose, common_args(s, detector = "builtin"))
+  f <- res$detection_features
+  expect_s3_class(f, "data.frame")
+  expect_identical(nrow(f), 200L)
+  expect_identical(rownames(f), colnames(s$query))
+  expect_true(all(c("sing_LL", "dbl_LL", "ll_diff") %in% names(f)))
+  # ll_diff is a definition, not an independent quantity. Assert it so a future
+  # change to compute_features() cannot silently alter what it means.
+  expect_equal(f$ll_diff, f$dbl_LL - f$sing_LL)
+  expect_true(all(is.finite(as.matrix(f))))
+})
+
+test_that("store_features = FALSE omits the features", {
+  skip_if_not_installed("xgboost")
+  s <- setup_query()
+  res <- do.call(compose, common_args(s, detector = "builtin", store_features = FALSE))
+  expect_null(res$detection_features)
+  expect_length(res$detection_score, 200)   # detection itself is unaffected
+})
+
+test_that("a supplied detector still yields features, at the primary level only", {
+  s <- setup_query()
+  byo <- rep(c(TRUE, FALSE), length.out = 200)
+  res <- do.call(compose, common_args(s, detector = byo))
+  f <- res$detection_features
+  expect_s3_class(f, "data.frame")
+  expect_identical(nrow(f), 200L)
+  expect_equal(f$ll_diff, f$dbl_LL - f$sing_LL)
+  # no per-level suffixes on this path
+  expect_false(any(grepl("_l[0-9]$", names(f))))
 })

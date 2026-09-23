@@ -198,7 +198,7 @@ compose_reffree <- function(query, hc_singlets = NULL, target_rate,
     n_cells = N, n_rounds = n_rounds, resolution = resolution, npcs = npcs,
     min_pair = min_pair, sing_min = sing_min, target_rate = target_rate,
     seed = seed, threshold = final$threshold,
-    detection_features = "PhiSpace scores",
+    detection_feature_source = "PhiSpace scores",
     n_final_clusters = length(unique(final$clusters[!is.na(final$clusters)])))
   structure(
     list(composition = comp, detection_score = final$score,
