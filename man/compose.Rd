@@ -14,6 +14,8 @@ compose(
   detector_threshold = NULL,
   n_per_pair = 200L,
   candidates = c("all5", "flex2", "fix1"),
+  same_type = TRUE,
+  pair_prior = c("frequency", "none"),
   output = c("top1", "topk", "conformal"),
   k = 3L,
   alpha = 0.1,
@@ -49,6 +51,17 @@ numeric score vector. Numeric scores require \code{detector_threshold}.}
 \item{n_per_pair}{Number of synthetic doublets generated per heterotypic pair.}
 
 \item{candidates}{Candidate-pair strategy.}
+
+\item{same_type}{Also consider a same-type composition (default \code{TRUE}): the
+top-scoring type paired with itself is added as one extra candidate per
+droplet, scored against a model fitted to simulated doublets of two cells of
+that type. \code{FALSE} restores the heterotypic-only composition exactly. Affects
+composition only; see "Same-type compositions and the pair prior".}
+
+\item{pair_prior}{\code{"frequency"} (default) weights each candidate pair by how
+often two randomly drawn high-confidence singlets would form it,
+\eqn{\pi(\{a,b\}) = 2 p_a p_b} and \eqn{\pi(\{a,a\}) = p_a^2}; \code{"none"}
+ranks by likelihood alone. Affects composition only.}
 
 \item{output}{One top pair, the top \code{k} pairs, or a conformal set.}
 
@@ -91,8 +104,8 @@ composition models, parameters, and provenance.
 }
 \description{
 Scores a count matrix against one or more labelled references, learns
-logit-normal models for synthetic heterotypic doublets, and assigns candidate
-cell-type pairs. The built-in detector combines PhiSpace score features with
+logit-normal models for synthetic heterotypic and (by default) same-type
+doublets, and assigns candidate cell-type pairs. The built-in detector combines PhiSpace score features with
 library-size features. Composition is calculated for every query cell; use
 \code{flag} to select calls made by the chosen detector.
 }
@@ -118,6 +131,35 @@ With a supplied \code{detector}, only the primary annotation level contributes.
 The per-level models exist solely inside the built-in detector's path, and
 the composition models are keyed on the primary level's types, so a second
 level's scores cannot be evaluated against them.
+}
+
+\section{Same-type compositions and the pair prior}{
+
+
+A doublet can contain two cells of the same type. With \code{same_type = TRUE} each
+droplet's candidates are the heterotypic pairs among its five highest-scoring
+types plus one same-type candidate, the top type paired with itself. Its model
+is fitted to simulated doublets built from two distinct high-confidence
+singlets of that type. On experimentally captured doublets this names about
+55-64\% of real same-type doublets correctly, at a cost of about 3 percentage
+points on heterotypic doublets, almost all between closely related subtypes.
+
+The same-type training doublets are scored in their own pool with the
+high-confidence singlets, separately from the heterotypic training pool, so
+the detector, its features and its scores are identical whether or not
+\code{same_type} is used.
+
+In score space a same-type doublet closely resembles a singlet of that type,
+so a same-type call means "only this type is evident"; whether the droplet
+holds one cell or two is the detector's question, not composition's.
+
+\code{pair_prior = "frequency"} adds the log prior to each candidate's
+log-likelihood before ranking. When the scores cannot separate two
+candidates, the pair made of more common types wins. This raises accuracy on
+the realistic mix of doublets and lowers it when every pair is weighted
+equally (balanced accuracy), because rarer-type pairs are pulled toward
+common explanations. The frequencies come from the high-confidence singlets.
+Conformal output (\code{output = "conformal"}) ignores both options.
 }
 
 \section{Shrinkage of the doublet-pair covariances}{

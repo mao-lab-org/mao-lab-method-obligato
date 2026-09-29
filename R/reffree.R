@@ -67,6 +67,14 @@ simulate_cluster_doublets <- function(counts, sing_idx, cl, target_rate,
 #' @param resolution,npcs Clustering parameters passed to `cluster_fn`.
 #' @param min_pair Minimum simulated cells required for a cluster-pair model.
 #' @param sing_min Minimum cells required for a cluster singlet model.
+#' @param same_type Also consider a same-cluster composition (default `TRUE`):
+#'   each cell's top-scoring cluster paired with itself is added as one extra
+#'   candidate, scored against a model fitted to simulated doublets of two
+#'   distinct cells of that final-round cluster. Detection is unaffected.
+#' @param pair_prior `"frequency"` (default) adds the log prior
+#'   \eqn{\log \pi}, with \eqn{\pi(\{a,b\}) = 2 p_a p_b} and
+#'   \eqn{\pi(\{a,a\}) = p_a^2} over final-round cluster frequencies, to each
+#'   candidate before ranking; `"none"` ranks by likelihood alone.
 #' @param seed Non-negative integer controlling clustering-time scoring, simulation,
 #'   and detector training.
 #' @param cluster_fn Function returning one cluster label per supplied cell.
@@ -79,6 +87,7 @@ simulate_cluster_doublets <- function(counts, sing_idx, cl, target_rate,
 compose_reffree <- function(query, hc_singlets = NULL, target_rate,
                             n_rounds = 4L, resolution = 1.0, npcs = 30L,
                             min_pair = 6L, sing_min = 15L, seed = 1L,
+                            same_type = TRUE, pair_prior = c("frequency", "none"),
                             cluster_fn = cluster_seurat, score_fn = score_phispace,
                             norm_fn = function(sce) PhiSpace::scranTransf(sce)) {
   .validate_counts(query)
@@ -92,6 +101,10 @@ compose_reffree <- function(query, hc_singlets = NULL, target_rate,
   min_pair <- .validate_scalar_integer(min_pair, "min_pair", 2L)
   sing_min <- .validate_scalar_integer(sing_min, "sing_min", 2L)
   seed <- .validate_scalar_integer(seed, "seed", 0L)
+  pair_prior <- match.arg(pair_prior)
+  if (!is.logical(same_type) || length(same_type) != 1L || is.na(same_type)) {
+    stop("`same_type` must be TRUE or FALSE.", call. = FALSE)
+  }
   if (length(resolution) != 1L || !is.numeric(resolution) ||
       is.na(resolution) || resolution <= 0) {
     stop("`resolution` must be a single positive number.", call. = FALSE)
@@ -184,26 +197,86 @@ compose_reffree <- function(query, hc_singlets = NULL, target_rate,
     final <- list(
       score = score_pool, threshold = threshold, clusters = cluster_map,
       sing_idx = sing_idx, pair_models = pair_models, S_pool = S_pool,
-      classifier = bst, feature_names = names(F_pool))
+      classifier = bst, feature_names = names(F_pool), ref = ref,
+      per = max(min_pair, ceiling(round(length(sing_idx) * target_rate /
+                                        (1 - target_rate)) / choose(length(clusters), 2L))),
+      round = r)
     dbl_flag <- score_pool > threshold
   }
 
+  # Composition, after the detection loop so detection is unaffected. Same-cluster
+  # models are simulated from the final clean pool and scored, like the
+  # heterotypic ones, in a pool of all cells plus the simulated doublets.
+  self_models <- NULL
+  fin_cl <- final$clusters[final$sing_idx]
+  if (isTRUE(same_type)) {
+    sim_self <- .with_seed(seed + 1000L, {
+      t2c <- split(final$sing_idx, fin_cl)
+      sA <- integer(); sB <- integer(); spl <- character()
+      for (cc in names(t2c)) {
+        pool <- t2c[[cc]]
+        if (length(pool) < 2L) next
+        ia <- sample(pool, final$per, replace = TRUE)
+        ib <- sample(pool, final$per, replace = TRUE)
+        while (any(clash <- ia == ib)) ib[clash] <- sample(pool, sum(clash), replace = TRUE)
+        sA <- c(sA, ia); sB <- c(sB, ib); spl <- c(spl, rep(pair_label(cc, cc), final$per))
+      }
+      list(counts = query[, sA, drop = FALSE] + query[, sB, drop = FALSE], pair_label = spl)
+    })
+    if (length(sim_self$pair_label)) {
+      colnames(sim_self$counts) <- paste0("sim_self_", seq_len(ncol(sim_self$counts)))
+      S_self <- .with_seed(seed + 2000L,
+        score_fn(cbind(query, sim_self$counts), final$ref, "cluster", " reffree-self"))
+      S_self <- .validate_scores(S_self, N + ncol(sim_self$counts), "Same-cluster scores")
+      Ys <- to_logit(S_self[N + seq_len(ncol(sim_self$counts)), , drop = FALSE])
+      self_models <- list()
+      for (pl in unique(sim_self$pair_label)) {
+        idx <- which(sim_self$pair_label == pl)
+        if (length(idx) >= min_pair) self_models[[pl]] <- fit_ln_shrink(Ys[idx, , drop = FALSE])
+      }
+      if (!length(self_models)) self_models <- NULL
+    }
+  }
+  cl_freq <- as.numeric(table(fin_cl)) / length(fin_cl)
+  names(cl_freq) <- names(table(fin_cl))
   LL <- all_pair_ll(final$S_pool, final$pair_models)
-  top1 <- max.col(LL, ties.method = "first")
+  lp_h <- if (pair_prior == "frequency") pair_log_prior(colnames(LL), cl_freq) else
+    stats::setNames(rep(0, ncol(LL)), colnames(LL))
+  LLp <- sweep(LL, 2L, lp_h, "+")
+  top1 <- max.col(LLp, ties.method = "first")
+  choice <- colnames(LL)[top1]
+  choice_ll <- LL[cbind(seq_len(N), top1)]
+  if (!is.null(self_models)) {
+    top_cl <- colnames(final$S_pool)[max.col(final$S_pool, ties.method = "first")]
+    self_pl <- pair_label(top_cl, top_cl)
+    has <- self_pl %in% names(self_models)
+    self_ll <- rep(-Inf, N)
+    Yp <- to_logit(final$S_pool)
+    for (pl in unique(self_pl[has])) {
+      w <- which(self_pl == pl)
+      self_ll[w] <- mvn_ll_rows(Yp[w, , drop = FALSE], self_models[[pl]])
+    }
+    self_lp <- if (pair_prior == "frequency")
+      ifelse(has, pair_log_prior(ifelse(has, self_pl, colnames(LL)[1L]), cl_freq), 0) else 0
+    take <- has & (self_ll + self_lp > LLp[cbind(seq_len(N), top1)])
+    choice[take] <- self_pl[take]
+    choice_ll[take] <- self_ll[take]
+  }
   comp <- data.frame(
-    cell = seq_len(N), top_pair = colnames(LL)[top1],
-    top_loglik = LL[cbind(seq_len(N), top1)], stringsAsFactors = FALSE)
+    cell = seq_len(N), top_pair = choice,
+    top_loglik = choice_ll, stringsAsFactors = FALSE)
 
   info <- list(
     n_cells = N, n_rounds = n_rounds, resolution = resolution, npcs = npcs,
     min_pair = min_pair, sing_min = sing_min, target_rate = target_rate,
-    seed = seed, threshold = final$threshold,
+    seed = seed, threshold = final$threshold, same_type = same_type,
+    n_self_models = length(self_models), pair_prior = pair_prior,
     detection_feature_source = "PhiSpace scores",
     n_final_clusters = length(unique(final$clusters[!is.na(final$clusters)])))
   structure(
     list(composition = comp, detection_score = final$score,
          flag = final$score > final$threshold, clusters = final$clusters,
-         pair_models = final$pair_models,
+         pair_models = final$pair_models, self_models = self_models,
          detection_model = list(
            classifier = final$classifier, threshold = final$threshold,
            feature_names = final$feature_names),

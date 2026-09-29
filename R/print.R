@@ -6,7 +6,10 @@
 print.obligato_composition <- function(x, ...) {
   cat("<obligato_composition>\n")
   cat("  cells:       ", x$info$n_cells, "\n", sep = "")
-  cat("  composition: ", x$info$output, " (", x$info$candidates, ")\n", sep = "")
+  cat("  composition: ", x$info$output, " (", x$info$candidates,
+      if (isTRUE(x$info$same_type)) " + same-type" else "",
+      if (identical(x$info$pair_prior, "frequency")) ", frequency prior" else "",
+      ")\n", sep = "")
   cat("  detector:    ", x$info$detector, "\n", sep = "")
   if (!is.null(x$flag)) {
     cat("  flagged:     ", sum(x$flag), " (",

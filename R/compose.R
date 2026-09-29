@@ -25,10 +25,17 @@ make_candidates <- function(top) {
 # its five highest PhiSpace scores (or every available type when fewer than five
 # exist) and ranked by their fitted logit-normal likelihood. `flagged` only
 # selects which rows to return; it does not affect a cell's composition.
+#
+# `same_models` (optional) adds ONE same-type candidate per cell, the top-scoring
+# type paired with itself ({top1, top1}); with the default all5 set that is 11
+# candidates. `log_prior` (optional) is a named log prior over pair labels, added
+# to each candidate's log-likelihood for RANKING only; the `ll` column of topk
+# output stays the raw log-likelihood and a `log_prior` column is added. With
+# both NULL the behaviour is exactly the heterotypic-only ranker.
 compose_pairs <- function(S, pair_models, flagged = NULL,
                           candidates = c("all5", "flex2", "fix1"),
                           output = c("top1", "topk", "conformal"),
-                          k = 3L) {
+                          k = 3L, same_models = NULL, log_prior = NULL) {
   candidates <- match.arg(candidates)
   output <- match.arg(output)
   if (output == "conformal") {
@@ -47,6 +54,27 @@ compose_pairs <- function(S, pair_models, flagged = NULL,
     }
   }
   k <- .validate_scalar_integer(k, "k", 1L)
+  if (!is.null(same_models)) {
+    if (!is.list(same_models) || !length(same_models) || is.null(names(same_models)) ||
+        anyDuplicated(names(same_models))) {
+      stop("`same_models` must be NULL or a non-empty, uniquely named list.", call. = FALSE)
+    }
+    sp <- strsplit(names(same_models), " + ", fixed = TRUE)
+    if (!all(vapply(sp, function(p) length(p) == 2L && p[1L] == p[2L], logical(1)))) {
+      stop("`same_models` must be named \"A + A\" (same-type pairs only).", call. = FALSE)
+    }
+    if (any(names(same_models) %in% names(pair_models))) {
+      stop("`same_models` and `pair_models` must not share names.", call. = FALSE)
+    }
+  }
+  all_models <- c(pair_models, same_models)
+  if (!is.null(log_prior)) {
+    if (!is.numeric(log_prior) || is.null(names(log_prior)) ||
+        !all(names(all_models) %in% names(log_prior)) ||
+        anyNA(log_prior[names(all_models)])) {
+      stop("`log_prior` must be a named numeric vector covering every model.", call. = FALSE)
+    }
+  }
 
   n    <- nrow(S)
   dims <- colnames(S)
@@ -57,7 +85,7 @@ compose_pairs <- function(S, pair_models, flagged = NULL,
     dims[order(S[i, ], decreasing = TRUE)[seq_len(n_top)]],
     character(n_top)))
 
-  pm_names <- names(pair_models)
+  pm_names <- names(all_models)
 
   # Candidate pairs are built from the SCORE COLUMN NAMES, so the pair models
   # must be keyed on the same cell-type vocabulary. If they are not, every
@@ -74,16 +102,23 @@ compose_pairs <- function(S, pair_models, flagged = NULL,
   }
 
   LL <- matrix(-Inf, n, length(pm_names), dimnames = list(NULL, pm_names))
-  for (pl in pm_names) LL[, pl] <- mvn_ll_rows(Y, pair_models[[pl]])
+  for (pl in pm_names) LL[, pl] <- mvn_ll_rows(Y, all_models[[pl]])
 
   rank_cell <- function(i) {
     cand <- make_candidates(top[i, ])[[candidates]]
+    if (!is.null(same_models)) {
+      # Appended last, so a tie with a heterotypic candidate goes to the latter.
+      cand <- rbind(cand, data.frame(c1 = top[i, 1L], c2 = top[i, 1L],
+                                     stringsAsFactors = FALSE))
+    }
     pls  <- pair_label(cand$c1, cand$c2)
     lls  <- rep(-Inf, nrow(cand))
     in_m <- pls %in% pm_names
     if (any(in_m)) lls[in_m] <- LL[i, pls[in_m]]
-    ord <- order(-lls, seq_along(lls))
-    list(cand = cand, ord = ord[in_m[ord]], lls = lls, has_model = any(in_m))
+    lpr  <- if (is.null(log_prior)) rep(0, length(pls)) else
+      ifelse(in_m, unname(log_prior[pls]), 0)
+    ord <- order(-(lls + lpr), seq_along(lls))
+    list(cand = cand, ord = ord[in_m[ord]], lls = lls, lpr = lpr, has_model = any(in_m))
   }
 
   if (output == "top1") {
@@ -110,16 +145,18 @@ compose_pairs <- function(S, pair_models, flagged = NULL,
       cell = rep.int(idx[m], length(take)), rank = seq_along(take),
       c1 = r$cand$c1[take], c2 = r$cand$c2[take], ll = r$lls[take],
       stringsAsFactors = FALSE)
+    if (!is.null(log_prior)) out[[m]]$log_prior <- r$lpr[take]
   }
   out <- Filter(NROW, out)
+  if (!is.null(log_prior)) empty$log_prior <- numeric()
   if (!length(out)) empty else do.call(rbind, out)
 }
 
 #' Identify doublet composition with an optional detector
 #'
 #' Scores a count matrix against one or more labelled references, learns
-#' logit-normal models for synthetic heterotypic doublets, and assigns candidate
-#' cell-type pairs. The built-in detector combines PhiSpace score features with
+#' logit-normal models for synthetic heterotypic and (by default) same-type
+#' doublets, and assigns candidate cell-type pairs. The built-in detector combines PhiSpace score features with
 #' library-size features. Composition is calculated for every query cell; use
 #' `flag` to select calls made by the chosen detector.
 #'
@@ -136,6 +173,15 @@ compose_pairs <- function(S, pair_models, flagged = NULL,
 #' @param detector_threshold Threshold for a numeric external detector score.
 #' @param n_per_pair Number of synthetic doublets generated per heterotypic pair.
 #' @param candidates Candidate-pair strategy.
+#' @param same_type Also consider a same-type composition (default `TRUE`): the
+#'   top-scoring type paired with itself is added as one extra candidate per
+#'   droplet, scored against a model fitted to simulated doublets of two cells of
+#'   that type. `FALSE` restores the heterotypic-only composition exactly. Affects
+#'   composition only; see "Same-type compositions and the pair prior".
+#' @param pair_prior `"frequency"` (default) weights each candidate pair by how
+#'   often two randomly drawn high-confidence singlets would form it,
+#'   \eqn{\pi(\{a,b\}) = 2 p_a p_b} and \eqn{\pi(\{a,a\}) = p_a^2}; `"none"`
+#'   ranks by likelihood alone. Affects composition only.
 #' @param output One top pair, the top `k` pairs, or a conformal set.
 #' @param k Number of pairs returned when `output = "topk"`.
 #' @param alpha Miscoverage level for conformal sets.
@@ -184,6 +230,33 @@ compose_pairs <- function(S, pair_models, flagged = NULL,
 #' The per-level models exist solely inside the built-in detector's path, and
 #' the composition models are keyed on the primary level's types, so a second
 #' level's scores cannot be evaluated against them.
+#'
+#' @section Same-type compositions and the pair prior:
+#'
+#' A doublet can contain two cells of the same type. With `same_type = TRUE` each
+#' droplet's candidates are the heterotypic pairs among its five highest-scoring
+#' types plus one same-type candidate, the top type paired with itself. Its model
+#' is fitted to simulated doublets built from two distinct high-confidence
+#' singlets of that type. On experimentally captured doublets this names about
+#' 55-64% of real same-type doublets correctly, at a cost of about 3 percentage
+#' points on heterotypic doublets, almost all between closely related subtypes.
+#'
+#' The same-type training doublets are scored in their own pool with the
+#' high-confidence singlets, separately from the heterotypic training pool, so
+#' the detector, its features and its scores are identical whether or not
+#' `same_type` is used.
+#'
+#' In score space a same-type doublet closely resembles a singlet of that type,
+#' so a same-type call means "only this type is evident"; whether the droplet
+#' holds one cell or two is the detector's question, not composition's.
+#'
+#' `pair_prior = "frequency"` adds the log prior to each candidate's
+#' log-likelihood before ranking. When the scores cannot separate two
+#' candidates, the pair made of more common types wins. This raises accuracy on
+#' the realistic mix of doublets and lowers it when every pair is weighted
+#' equally (balanced accuracy), because rarer-type pairs are pulled toward
+#' common explanations. The frequencies come from the high-confidence singlets.
+#' Conformal output (`output = "conformal"`) ignores both options.
 #'
 #' @section Shrinkage of the doublet-pair covariances:
 #'
@@ -239,6 +312,7 @@ compose <- function(query, reference, phenotypes, hc_singlets,
                     hc_labels = NULL, detector = "builtin",
                     detector_threshold = NULL, n_per_pair = 200L,
                     candidates = c("all5", "flex2", "fix1"),
+                    same_type = TRUE, pair_prior = c("frequency", "none"),
                     output = c("top1", "topk", "conformal"),
                     k = 3L, alpha = 0.10, seed = 1L,
                     eb = TRUE, eb_lambda = 0.75,
@@ -247,7 +321,11 @@ compose <- function(query, reference, phenotypes, hc_singlets,
                     score_fn = score_phispace) {
   .validate_counts(query)
   candidates <- match.arg(candidates)
+  pair_prior <- match.arg(pair_prior)
   output <- match.arg(output)
+  if (!is.logical(same_type) || length(same_type) != 1L || is.na(same_type)) {
+    stop("`same_type` must be TRUE or FALSE.", call. = FALSE)
+  }
   n_per_pair <- .validate_scalar_integer(n_per_pair, "n_per_pair", 30L)
   seed <- .validate_scalar_integer(seed, "seed", 0L)
   k <- .validate_scalar_integer(k, "k", 1L)
@@ -330,6 +408,32 @@ compose <- function(query, reference, phenotypes, hc_singlets,
   S_dbl <- S_join[n_sing + seq_len(ncol(sim$counts)), , drop = FALSE]
 
   mods <- fit_doublet_models(S_sing, hc_labels, S_dbl, sim$pair_label, types)
+
+  # Same-type composition models. Simulated from two distinct singlets of one
+  # type and scored in their OWN pool with the singlets, so the heterotypic pool
+  # above -- and with it every detection feature and score -- is untouched.
+  same_models <- NULL
+  if (isTRUE(same_type)) {
+    sim_same <- simulate_same_type_doublets(cnt, hc_idx, hc_labels, types,
+                                            n_per_pair, seed + 2L)
+    if (ncol(sim_same$counts)) {
+      same_counts <- cbind(cnt[, hc_idx, drop = FALSE], sim_same$counts)
+      S_same_join <- .with_seed(seed + 3L,
+        score_fn(same_counts, ref1, pheno1, " train-same"))
+      S_same_join <- .validate_scores(S_same_join, ncol(same_counts),
+                                      "Same-type training scores",
+                                      expected = colnames(S_all))
+      same_models <- fit_doublet_models(
+        S_same_join[seq_len(n_sing), , drop = FALSE], hc_labels,
+        S_same_join[n_sing + seq_len(ncol(sim_same$counts)), , drop = FALSE],
+        sim_same$pair_label, types)$pair_models
+      if (!length(same_models)) same_models <- NULL
+    }
+  }
+  type_freq <- as.numeric(table(factor(hc_labels, levels = types))) / length(hc_labels)
+  names(type_freq) <- types
+  log_prior <- if (pair_prior == "frequency")
+    pair_log_prior(c(names(mods$pair_models), names(same_models)), type_freq) else NULL
 
   # Empirical-Bayes shrinkage of the PAIR covariances is applied to the DETECTION
   # path only, and is set up inside the detector branch below. `mods` stays
@@ -537,7 +641,8 @@ compose <- function(query, reference, phenotypes, hc_singlets,
     conformal <- list(q_hat = cf$q_hat, alpha = alpha, sizes = cf$sizes)
   } else {
     comp <- compose_pairs(S_all, mods$pair_models, candidates = candidates,
-                          output = output, k = k)
+                          output = output, k = k, same_models = same_models,
+                          log_prior = log_prior)
   }
 
   # One row per query droplet, in query column order. `flag` and
@@ -559,14 +664,16 @@ compose <- function(query, reference, phenotypes, hc_singlets,
     phenotypes = phenotypes, detector = detector_name,
     detection_feature_source = if (identical(detector, "builtin"))
       "PhiSpace scores plus library size" else NULL,
-    candidates = candidates, output = output, n_per_pair = n_per_pair,
+    candidates = candidates, same_type = same_type,
+    n_same_models = length(same_models), pair_prior = pair_prior,
+    type_freq = type_freq, output = output, n_per_pair = n_per_pair,
     seed = seed, threshold = threshold,
     alpha = if (output == "conformal") alpha else NULL)
 
   structure(
     list(composition = comp, detection_score = det_score, flag = flag,
          detection_features = F_all,
-         conformal = conformal, models = mods,
+         conformal = conformal, models = c(mods, list(same_models = same_models)),
          detection_model = detection_model, info = info,
          provenance = .package_provenance()),
     class = "obligato_composition")

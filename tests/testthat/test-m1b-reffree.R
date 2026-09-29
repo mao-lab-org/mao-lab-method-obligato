@@ -48,7 +48,33 @@ test_that("compose_reffree returns a well-formed obligato_reffree object", {
   expect_length(res$clusters, N)
   expect_identical(res$info$detection_feature_source, "PhiSpace scores")
   expect_true(length(res$pair_models) > 0L)
-  expect_true(all(res$composition$top_pair %in% names(res$pair_models)))
+  expect_true(all(res$composition$top_pair %in%
+                    c(names(res$pair_models), names(res$self_models))))
+})
+
+test_that("reference-free self-pairs and prior leave detection unchanged", {
+  skip_if_not_installed("xgboost")
+  on <- run()
+  off <- run(same_type = FALSE, pair_prior = "none")
+  expect_identical(on$detection_score, off$detection_score)
+  expect_identical(on$flag, off$flag)
+  expect_identical(on$pair_models, off$pair_models)
+  expect_null(off$self_models)
+  expect_true(on$info$same_type)
+  expect_gt(on$info$n_self_models, 0)
+  sp <- strsplit(names(on$self_models), " + ", fixed = TRUE)
+  expect_true(all(vapply(sp, function(p) p[1] == p[2], TRUE)))
+})
+
+test_that("with both options off, reference-free composition is the argmax over pairs", {
+  skip_if_not_installed("xgboost")
+  off <- run(same_type = FALSE, pair_prior = "none")
+  # fake_score depends only on row position and the cluster vocabulary (always
+  # c0-c3 under fake_cluster), so the final pool scores can be regenerated.
+  S_pool <- fake_score(setup_query(), list(cluster = paste0("c", 0:3)), "cluster")
+  LL <- Obligato:::all_pair_ll(S_pool, off$pair_models)
+  expect_true(all(off$composition$top_pair %in% names(off$pair_models)))
+  expect_identical(off$composition$top_pair, colnames(LL)[max.col(LL, ties.method = "first")])
 })
 
 test_that("flag uses the per-round ecdf threshold, not 0.5", {

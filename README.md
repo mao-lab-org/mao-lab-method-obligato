@@ -11,7 +11,7 @@ The name is the anglicised variant of the musical *obbligato*: a part that canno
 be omitted. Detection says that a droplet is likely to be a doublet; composition
 provides the information needed to decide what to do with it.
 
-> Early development (`0.0.0.9001`). The API may change before the first tagged release.
+> Early development (`0.0.0.9002`). The API may change before the first tagged release.
 
 ## Installation
 
@@ -98,6 +98,28 @@ res <- compose(
 )
 ```
 
+### Same-type compositions and the pair prior
+
+A doublet can hold two cells of the same type. By default each droplet's
+candidates include one same-type pair — its top-scoring type paired with itself —
+and candidates are ranked with a prior from the cell-type frequencies among the
+high-confidence singlets, $\pi(\{a,b\}) = 2 p_a p_b$ and $\pi(\{a,a\}) = p_a^2$:
+
+```r
+res <- compose(query, reference, "celltype", hc_flag)                 # defaults
+
+res <- compose(query, reference, "celltype", hc_flag,
+               same_type = FALSE, pair_prior = "none")                # heterotypic only, no prior
+```
+
+Both options affect composition only; detection is identical either way. In score
+space a same-type doublet looks like a singlet of that type, so a same-type call
+means "only this type is evident" — whether the droplet holds one cell or two is
+the detector's question. The prior raises accuracy on the realistic mix of
+doublets and lowers it when every pair is weighted equally, because rarer-type
+pairs are pulled toward common explanations. `compose_reffree()` has the same two
+options, over clusters.
+
 ### Alternative composition outputs
 
 ```r
@@ -114,7 +136,8 @@ sets <- compose(
 
 Conformal sets are calibrated using independent synthetic doublets. Their nominal
 coverage relies on calibration and target doublets being exchangeable; users
-should verify empirical coverage when ground truth is available.
+should verify empirical coverage when ground truth is available. Conformal sets
+are heterotypic-only and ignore `same_type` and `pair_prior`.
 
 ### Shrinkage of the pair covariances
 
@@ -122,22 +145,22 @@ Each cell-type pair needs its own covariance, estimated from the simulated
 doublets of that pair alone, so with many reference types the estimates get
 noisy. By default `compose()` blends each one toward a target predicted from the
 two constituents' singlet models — which are estimated from many more cells,
-since every type appears in many pairs — and chooses the blending weight by
-cross-validation on the simulated doublets.
+since every type appears in many pairs — with a fixed weight of 0.75. The shrunk
+models feed the **detection features only**; composition uses the unshrunk
+models, so composition calls are identical with and without shrinkage.
 
 ```r
-res <- compose(query, reference, "celltype", hc_flag)            # on by default
+res <- compose(query, reference, "celltype", hc_flag)            # on, weight 0.75
 
 res <- compose(query, reference, "celltype", hc_flag, eb = FALSE) # no shrinkage
 
 res <- compose(query, reference, "celltype", hc_flag,
-               eb_lambda = 0.5)                                   # skip the CV
+               eb_lambda = "cv")                                  # cross-validate
 ```
 
-The cross-validation needs no ground truth, and it can select a weight of zero,
-declining to shrink where shrinkage would not help — which is what it does on
-data whose pair covariances are already well determined. The chosen weight and
-the full cross-validation curve are recorded in `res$info$eb`.
+`eb_lambda = "cv"` chooses the weight by cross-validated detection AUPRC on the
+simulated doublets; it needs no ground truth and can select zero. The chosen
+weight and any cross-validation curve are recorded in `res$info$eb`.
 
 Selection costs around two minutes for a reference of twenty types and grows
 with the number of pairs; fixing `eb_lambda` to a number skips it. `eb_grid`

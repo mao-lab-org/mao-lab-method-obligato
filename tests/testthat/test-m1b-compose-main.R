@@ -82,7 +82,12 @@ test_that("compose is deterministic and invokes compose_pairs correctly", {
 
   # composition equals compose_pairs() run on the same scores + fitted models
   S_all <- fake_scorer(s$query, s$reference, "celltype")
-  manual <- compose_pairs(S_all, r1$models$pair_models, candidates = "all5", output = "top1")
+  # Defaults: one same-type candidate per droplet and the frequency prior.
+  manual <- compose_pairs(S_all, r1$models$pair_models, candidates = "all5", output = "top1",
+                          same_models = r1$models$same_models,
+                          log_prior = Obligato:::pair_log_prior(
+                            c(names(r1$models$pair_models), names(r1$models$same_models)),
+                            r1$info$type_freq))
   expect_identical(r1$composition$c1, manual$c1)
   expect_identical(r1$composition$c2, manual$c2)
 })

@@ -1,6 +1,6 @@
 Package: Obligato
 Title: Doublet Composition Identification from Continuous Cell-Type Scores
-Version: 0.0.0.9001
+Version: 0.0.0.9002
 Authors@R:
     person("Jiadong", "Mao", role = c("aut", "cre"), email = "chiatungmao@gmail.com")
 Description: Identifies the cell-type composition of doublets in single-cell RNA-seq

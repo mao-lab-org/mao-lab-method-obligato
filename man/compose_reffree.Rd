@@ -14,6 +14,8 @@ compose_reffree(
   min_pair = 6L,
   sing_min = 15L,
   seed = 1L,
+  same_type = TRUE,
+  pair_prior = c("frequency", "none"),
   cluster_fn = cluster_seurat,
   score_fn = score_phispace,
   norm_fn = function(sce) PhiSpace::scranTransf(sce)
@@ -36,6 +38,16 @@ compose_reffree(
 
 \item{seed}{Non-negative integer controlling clustering-time scoring, simulation,
 and detector training.}
+
+\item{same_type}{Also consider a same-cluster composition (default \code{TRUE}):
+each cell's top-scoring cluster paired with itself is added as one extra
+candidate, scored against a model fitted to simulated doublets of two
+distinct cells of that final-round cluster. Detection is unaffected.}
+
+\item{pair_prior}{\code{"frequency"} (default) adds the log prior
+\eqn{\log \pi}, with \eqn{\pi(\{a,b\}) = 2 p_a p_b} and
+\eqn{\pi(\{a,a\}) = p_a^2} over final-round cluster frequencies, to each
+candidate before ranking; \code{"none"} ranks by likelihood alone.}
 
 \item{cluster_fn}{Function returning one cluster label per supplied cell.}
 
