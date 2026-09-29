@@ -19,15 +19,20 @@ skip_if_no_scripts <- function() {
   skip_if_not(file.exists(f), "original scripts not reachable; set OBLIGATO_PROJECT_ROOT")
 }
 
-# Source only the function definitions from a script, without running its body.
-# The scripts are top-to-bottom pipelines, so we parse and evaluate assignments only.
+# Source only the function definitions -- and the scripts' own numeric constants,
+# such as .EPS, which those functions read -- without running the pipeline body.
+# The parent environment supplies corpcor::cov.shrink, which the scripts get from
+# library(corpcor): under R CMD check nothing is attached, and borrowing the
+# package's own values would hide exactly the drift this file guards against.
 source_defs <- function(path) {
-  e <- new.env(parent = globalenv())
+  parent <- list2env(list(cov.shrink = corpcor::cov.shrink), parent = globalenv())
+  e <- new.env(parent = parent)
   exprs <- parse(path)
   for (ex in exprs) {
     if (is.call(ex) && length(ex) >= 3 &&
         as.character(ex[[1]])[1] %in% c("<-", "=") &&
-        is.call(ex[[3]]) && identical(as.character(ex[[3]][[1]])[1], "function")) {
+        (is.numeric(ex[[3]]) ||
+         (is.call(ex[[3]]) && identical(as.character(ex[[3]][[1]])[1], "function")))) {
       try(eval(ex, envir = e), silent = TRUE)
     }
   }
